@@ -1,0 +1,59 @@
+{
+  "name": "pi-lsp",
+  "version": "0.1.0",
+  "description": "LSP extension for pi, aligned with Claude Code's LSP tool: code navigation and post-edit diagnostics for C/C++, Rust, Go, TypeScript/JavaScript, Python, CSS and HTML.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yinziyang/pi-lsp.git"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "test:real": "node --test \"eval/real/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "vscode-jsonrpc": "^9.0.2",
+    "vscode-languageserver-protocol": "^3.18.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi-lsp/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.87.1",
+    "@earendil-works/pi-tui": "^0.87.1",
+    "@types/node": "^24.13.6",
+    "typebox": "^1.3.27",
+    "typescript": "5.9"
+  }
+}
