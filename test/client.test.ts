@@ -177,6 +177,14 @@ test("B-6 消息头超过 64KB 时按崩溃处理", async () => {
 	await c.stop();
 });
 
+test("B-6 正文超过 32MB 时按崩溃处理，不等正文读完", async () => {
+	const { c, crashes } = client({ hugeBody: true });
+	await c.start();
+	assert.ok(await waitUntil(() => crashes.length === 1));
+	assert.match(crashes[0].message, /body of \d+ bytes exceeds/);
+	await c.stop();
+});
+
 test("进程意外退出时报告崩溃，文本包含退出码", async () => {
 	const { c, crashes } = client({ crashAfterMs: 100 });
 	await c.start();

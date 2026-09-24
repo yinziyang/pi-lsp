@@ -20,6 +20,7 @@
 //   crashAfterMs        initialized 之后多久以退出码 3 退出
 //   garbage             initialized 之后往 stdout 写非协议文本
 //   hugeHeader          initialized 之后发一个超长消息头
+//   hugeBody            initialized 之后发一个声明正文超过 32MB 的消息头
 //   spawnChild          起一个换了进程组的 sleep 子进程，测试进程树清理
 
 import { spawn } from "node:child_process";
@@ -102,6 +103,7 @@ function onNotification(msg) {
 		if (S.crashAfterMs !== undefined) setTimeout(() => process.exit(3), S.crashAfterMs);
 		if (S.garbage) setTimeout(() => process.stdout.write("this is not an LSP message\n".repeat(4)), 50);
 		if (S.hugeHeader) setTimeout(() => process.stdout.write(`Content-Type: application/${"a".repeat(70 * 1024)}`), 50);
+		if (S.hugeBody) setTimeout(() => process.stdout.write(`Content-Length: ${40 * 1024 * 1024}\r\n\r\n`), 50);
 		if (S.spawnChild) {
 			const c = spawn("sleep", ["600"], { detached: true, stdio: "ignore" });
 			log({ ev: "child", pid: c.pid });
