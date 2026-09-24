@@ -49,6 +49,18 @@ pi install git:https://github.com/yinziyang/pi-lsp.git
 - `/lsp install <语言>`：安装语言服务器。
 - `/lsp restart [服务器]`：重启服务器。
 
+## 状态栏
+
+交互界面的底栏里有一段 pi-lsp 的状态，随服务器状态实时刷新：
+
+- `LSP idle`：还没有服务器在运行（服务器用到才启动）。
+- `LSP gopls ✓ · pyright …`：运行中的服务器是绿色的 `✓`，启动中是黄色的 `…`，出错是红色的 `✗`。
+- 同一服务器在多个项目根上各有实例时写成 `gopls ✓×2`。
+- `LSP installing pyright…`：正在安装。
+
+装不装 pi-statusline 都能显示，两边都读 pi 的 `setStatus`。
+非交互模式（`-p`、`--mode json`）与没有任何可用服务器时不显示。
+
 ## 配置
 
 写在 pi 的 `~/.pi/agent/settings.json`，或受信项目的 `.pi/settings.json`（后者覆盖前者）的 `lsp` 键下：

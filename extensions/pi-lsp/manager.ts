@@ -49,6 +49,8 @@ export interface ManagerOptions {
 	/** 空闲检查的间隔，毫秒；测试里调小。 */
 	sweepIntervalMs?: number;
 	log?: (message: string) => void;
+	/** 任一实例的状态变化时调用（启动、就绪、崩溃、关闭），用于刷新状态栏；调用方自己读 all。 */
+	onChange?: () => void;
 }
 
 export class ServerManager {
@@ -113,6 +115,7 @@ export class ServerManager {
 				this.opts.hub.receive(p.uri, `${key}\u0000push`, p.diagnostics);
 			},
 			onDiagnosticsRefresh: () => void this.pullOpen(inst),
+			onStateChange: () => this.opts.onChange?.(),
 			onCrash: (err) => {
 				inst.failures++;
 				inst.crashed = true;

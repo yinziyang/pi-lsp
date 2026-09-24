@@ -43,6 +43,8 @@ export interface ClientOptions {
 	onDiagnosticsRefresh: () => void;
 	/** 进程意外退出或协议违规；正常关闭不会触发。 */
 	onCrash: (error: Error) => void;
+	/** 状态每变化一次调用一次，用于刷新界面上的状态显示；不传参数，调用方自己读 state。 */
+	onStateChange?: () => void;
 }
 
 /** 关闭流程第二步：发 exit 后等进程退出的上限。 */
@@ -120,7 +122,7 @@ export class LspClient {
 	private conn: MessageConnection | undefined;
 	private stopping: Promise<void> | undefined;
 	private stderrTail = "";
-	state: ClientState = "stopped";
+	private current: ClientState = "stopped";
 	capabilities: ServerCapabilities = {};
 	lastError: Error | undefined;
 	/** 服务器通过 client/registerCapability 动态注册的方法名。 */
@@ -130,6 +132,17 @@ export class LspClient {
 
 	constructor(opts: ClientOptions) {
 		this.opts = opts;
+	}
+
+	/** 当前状态；只由本类改变，每次变化通知 onStateChange。 */
+	get state(): ClientState {
+		return this.current;
+	}
+
+	private setState(next: ClientState): void {
+		if (next === this.current) return;
+		this.current = next;
+		this.opts.onStateChange?.();
 	}
 
 	get pid(): number | undefined {
@@ -149,7 +162,7 @@ export class LspClient {
 	/** 启动进程并完成 initialize 握手。失败时进程已被终止，状态为 error，抛出原因。 */
 	async start(): Promise<void> {
 		const o = this.opts;
-		this.state = "starting";
+		this.setState("starting");
 		this.lastError = undefined;
 		this.stderrTail = "";
 		this.registrations.clear();
@@ -166,7 +179,7 @@ export class LspClient {
 		try {
 			await spawned;
 		} catch (e) {
-			this.state = "error";
+			this.setState("error");
 			this.lastError = e as Error;
 			throw e;
 		}
@@ -186,14 +199,14 @@ export class LspClient {
 			this.capabilities = result?.capabilities ?? {};
 			await conn.sendNotification("initialized", {});
 			if (o.settings !== undefined) await conn.sendNotification("workspace/didChangeConfiguration", { settings: o.settings });
-			this.state = "running";
+			this.setState("running");
 		} catch (e) {
 			// 初始化期间进程退出时，onExit 已记下退出码与 stderr，比「连接已释放」更能说明原因，优先用它。
 			const err = (this.state as ClientState) === "error" && this.lastError ? this.lastError : (e as Error);
 			const tail = this.stderrTail.trim();
 			this.lastError = tail && !err.message.includes(tail) ? new Error(`${err.message}\n${tail}`) : err;
 			await this.stop();
-			this.state = "error";
+			this.setState("error");
 			throw this.lastError;
 		}
 	}
@@ -231,7 +244,7 @@ export class LspClient {
 		if (this.state === "stopping" || this.state === "stopped" || this.state === "error") return;
 		this.lastError = err;
 		const wasRunning = this.state === "running";
-		this.state = "error";
+		this.setState("error");
 		if (this.child) void forceTerminate(this.child, TERM_WAIT_MS);
 		if (wasRunning) this.opts.onCrash(err);
 	}
@@ -245,7 +258,7 @@ export class LspClient {
 		const err = new Error(`LSP server '${this.opts.name}' ${why}${tail ? `\n${tail}` : ""}`);
 		const wasRunning = this.state === "running";
 		if (this.state !== "error") this.lastError = err;
-		this.state = "error";
+		this.setState("error");
 		if (wasRunning) this.opts.onCrash(this.lastError ?? err);
 	}
 
@@ -314,7 +327,7 @@ export class LspClient {
 	private async doStop(): Promise<void> {
 		const child = this.child;
 		const conn = this.conn;
-		this.state = "stopping";
+		this.setState("stopping");
 		if (child && child.exitCode === null && child.signalCode === null) {
 			const exited = new Promise<void>((r) => child.once("exit", () => r()));
 			if (conn) {
@@ -336,6 +349,6 @@ export class LspClient {
 		if (child?.pid !== undefined) this.opts.registry?.remove(child.pid);
 		this.child = undefined;
 		this.conn = undefined;
-		this.state = "stopped";
+		this.setState("stopped");
 	}
 }

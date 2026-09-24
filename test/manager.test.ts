@@ -215,3 +215,19 @@ test("启动后登记进程记录，关闭后删除", async () => {
 	assert.equal(readdirSync(join(cwd, "pids")).length, 0);
 });
 
+
+test("状态栏：实例启动、就绪、崩溃、关闭时都通知 onChange", async () => {
+	const cwd = tempDir();
+	const servers = [fakeServer("fake", { crashAfterMs: 300 }, { restartOnCrash: false })];
+	const settings: LspSettings = { servers, idleTimeoutMs: 60_000, autoInstall: false, diagnostics: true };
+	const seen: string[] = [];
+	let inst: import("../extensions/pi-lsp/manager.ts").Instance | undefined;
+	const manager = new ServerManager({ router: new Router(servers, { cwd, toolDirs: [], env: process.env }), settings, hub: new DiagnosticsHub(cwd, 50), onChange: () => seen.push(inst?.client.state ?? "?") });
+	const file = writeFile(cwd, "a.fake", "x");
+	inst = lookupOk(manager, file);
+	await manager.ensureRunning(inst);
+	assert.deepEqual(seen, ["starting", "running"]);
+	assert.ok(await waitUntil(() => seen.includes("error")), "崩溃后通知");
+	await manager.shutdownAll();
+	assert.ok(seen.at(-1) === "stopped", `关闭后最后一次通知是 stopped，实际 ${seen.join(",")}`);
+});

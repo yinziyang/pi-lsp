@@ -5,6 +5,8 @@
 //   - tool_result：edit / write 成功后同步文件并短暂等待诊断（D5），bash 之后比对已打开文件（D6），随后把待送诊断用 steer 投递。
 //   - agent_end：本轮结束后才到的诊断用 nextTurn 投递，在用户下次发消息时送达。
 //   - session_shutdown：关闭本会话的全部服务器，每个都有上限。
+//   - 状态栏：实例状态每变化一次，用 ctx.ui.setStatus 写一次，运行中的服务器用主题的 success 色（绿色）标出。
+//     pi 自带的底栏与 pi-statusline 都把 setStatus 的各个键按键名排序显示在一行里，所以不需要探测装没装 pi-statusline。
 // 生命周期的完整说明见 manager.ts 与 process.ts；设计依据见计划文档 docs/pi-lsp-plan.md。
 
 import { execFile } from "node:child_process";
@@ -15,6 +17,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { loadSettings, type LspSettings } from "./config.ts";
 import { DiagnosticsHub } from "./diagnostics.ts";
 import { type Exec, installHint, installPlan, INSTALLABLE, type PlanContext, runInstall, serverForTarget, toolDirs } from "./install.ts";
+import type { ClientState } from "./client.ts";
 import { ServerManager } from "./manager.ts";
 import { PidRegistry } from "./process.ts";
 import { resolveCommand, Router } from "./routing.ts";
@@ -23,6 +26,13 @@ import { createLspTool, type ToolRuntime } from "./tool.ts";
 const MESSAGE_TYPE = "lsp-diagnostics";
 /** D5：edit / write 之后等诊断的上限，毫秒，包含首次编辑时拉起服务器的时间；安静窗口见 diagnostics.ts 的 QUIET_MS。 */
 const EDIT_WAIT_MS = 3000;
+/**
+ * 状态栏的键。
+ * pi 与 pi-statusline 都按键名排序、把各扩展的状态拼成一行，pi-statusline 还给整行套一层 dim。
+ * 我们的状态带颜色，主题的 fg 在末尾只复位前景色，排在我们后面的状态会因此丢掉外层的 dim。
+ * 所以键取一个排在最后的名字，后面不再有别的状态；键本身不显示。
+ */
+const STATUS_KEY = "zz-pi-lsp";
 
 interface Runtime extends ToolRuntime {
 	settings: LspSettings;
@@ -32,6 +42,10 @@ interface Runtime extends ToolRuntime {
 	ctx: ExtensionContext;
 	/** 本会话已经提示过「未安装」的服务器，每个只提示一次。 */
 	warnedMissing: Set<string>;
+	/** 正在安装的服务器说明，安装期间显示在状态栏。 */
+	installing?: string;
+	/** 上一次写进状态栏的文本，没变就不再写。 */
+	lastStatus?: string;
 }
 
 /** 生产环境的命令执行：execFile，带超时与中止；不经过 shell。 */
@@ -78,6 +92,37 @@ export default function piLsp(pi: ExtensionAPI) {
 		}
 	});
 
+	/**
+	 * 刷新状态栏。
+	 * 只刷当前会话的：会话结束后旧实例关闭时还会触发状态变化，那时 rt 已换掉，直接忽略。
+	 * 非交互模式与没有注册 lsp 工具（一个服务器都没有）时不显示。
+	 */
+	const showStatus = (r: Runtime) => {
+		if (rt !== r || !r.ctx.hasUI || !toolRegistered) return;
+		const theme = r.ctx.ui.theme as { fg?: (color: StatusColor, text: string) => string } | undefined;
+		// 拿不到主题时退回纯文本。
+		const text = statusBarText(r, typeof theme?.fg === "function" ? (c, t) => theme.fg!(c, t) : undefined);
+		if (text === r.lastStatus) return;
+		r.lastStatus = text;
+		try {
+			r.ctx.ui.setStatus(STATUS_KEY, text);
+		} catch {
+			// 会话被替换后旧的 ctx 会失效，状态栏写不进去不影响功能。
+		}
+	};
+
+	/** 安装期间在状态栏显示正在装什么，装完恢复。 */
+	const installing = async <T>(r: Runtime, label: string, run: () => Promise<T>): Promise<T> => {
+		r.installing = label;
+		showStatus(r);
+		try {
+			return await run();
+		} finally {
+			r.installing = undefined;
+			showStatus(r);
+		}
+	};
+
 	const flush = (deliverAs: "steer" | "nextTurn") => {
 		const out = rt?.hub.take();
 		if (!out) return;
@@ -91,7 +136,7 @@ export default function piLsp(pi: ExtensionAPI) {
 		if ("error" in plan) return { installed: false, note: installHint(serverName, r.planCtx) };
 		const consent = r.ctx.hasUI ? await r.ctx.ui.confirm("Install language server?", `pi-lsp needs ${plan.label}. Install it into ${r.planCtx.lspDir}?`) : r.settings.autoInstall;
 		if (!consent) return { installed: false, note: installHint(serverName, r.planCtx) };
-		const result = await runInstall(plan, exec, process.env, signal);
+		const result = await installing(r, plan.label, () => runInstall(plan, exec, process.env, signal));
 		if (!result.ok) return { installed: false, note: `Installing ${plan.label} failed:\n${result.output.slice(-1500)}` };
 		return { installed: true, note: "" };
 	};
@@ -114,7 +159,8 @@ export default function piLsp(pi: ExtensionAPI) {
 		const swept = registry.sweep();
 		const router = new Router(settings.servers, { cwd: ctx.cwd, toolDirs: dirs, env: process.env });
 		const hub = new DiagnosticsHub(ctx.cwd);
-		const manager = new ServerManager({ router, settings, hub, registry });
+		// runtime 在下面才建好；onChange 只在实例状态变化时调用，那时它已经赋值。
+		const manager = new ServerManager({ router, settings, hub, registry, onChange: () => showStatus(runtime) });
 		liveManagers.add(manager);
 		const planCtx: PlanContext = { lspDir, platform: process.platform, resolve: (c) => resolveCommand(c, dirs, [dirname(process.execPath), process.env.PATH ?? ""].join(delimiter)) };
 		const runtime: Runtime = {
@@ -134,6 +180,7 @@ export default function piLsp(pi: ExtensionAPI) {
 			pi.registerTool(createLspTool(() => rt));
 			toolRegistered = true;
 		}
+		showStatus(runtime);
 		if (ctx.hasUI) {
 			for (const w of warnings) ctx.ui.notify(`[pi-lsp] ${w}`, "warning");
 			for (const c of router.conflicts) ctx.ui.notify(`[pi-lsp] ${c.ext} is handled by '${c.winner}'; '${c.loser}' will not be used for it`, "warning");
@@ -145,6 +192,13 @@ export default function piLsp(pi: ExtensionAPI) {
 		const r = rt;
 		rt = undefined;
 		if (!r) return;
+		if (r.lastStatus !== undefined) {
+			try {
+				r.ctx.ui.setStatus(STATUS_KEY, undefined);
+			} catch {
+				// ctx 已失效时 pi 会随会话一起清掉状态栏。
+			}
+		}
 		r.hub.dispose();
 		await r.manager.shutdownAll();
 		liveManagers.delete(r.manager);
@@ -193,7 +247,7 @@ export default function piLsp(pi: ExtensionAPI) {
 				const plan = installPlan(target, r.planCtx);
 				if ("error" in plan) return ctx.ui.notify(plan.error, "warning");
 				ctx.ui.notify(`[pi-lsp] installing ${plan.label}…`, "info");
-				const res = await runInstall(plan, exec, process.env);
+				const res = await installing(r, plan.label, () => runInstall(plan, exec, process.env));
 				return ctx.ui.notify(res.ok ? `[pi-lsp] installed ${plan.label}` : `[pi-lsp] install failed:\n${res.output.slice(-1500)}`, res.ok ? "info" : "error");
 			}
 			if (sub === "restart") {
@@ -229,4 +283,39 @@ export function statusText(r: Pick<Runtime, "manager" | "router" | "settings">):
 	}
 	for (const c of r.router.conflicts) lines.push(`  conflict: ${c.ext} → '${c.winner}' (ignored '${c.loser}')`);
 	return lines.join("\n");
+}
+
+/** 状态栏用到的主题颜色。 */
+export type StatusColor = "success" | "warning" | "error" | "dim";
+
+/** 各状态在状态栏里的标记与颜色；stopped 与 stopping 不显示。 */
+const STATE_STYLE: Partial<Record<ClientState, { mark: string; color: StatusColor }>> = {
+	running: { mark: "✓", color: "success" },
+	starting: { mark: "…", color: "warning" },
+	error: { mark: "✗", color: "error" },
+};
+
+/**
+ * 状态栏文本，例如 `LSP gopls ✓ · pyright …`、`LSP rust-analyzer ✗`、`LSP idle`、`LSP installing pyright…`。
+ * 同一服务器有多个实例（多个项目根）时合成一项：有出错的算出错，其次有启动中的算启动中，并附上实例数。
+ * paint 按主题上色：运行中绿色、启动中黄色、出错红色，其余文字 dim。
+ * 每一段都显式上色，不依赖外层颜色：pi 自带的底栏不给状态上色，pi-statusline 给整行套 dim，两边看起来一致。
+ * 不传 paint 时返回纯文本。
+ */
+export function statusBarText(r: { manager: Pick<ServerManager, "all">; installing?: string }, paint: (color: StatusColor, text: string) => string = (_c, t) => t): string {
+	if (r.installing) return paint("warning", `LSP installing ${r.installing}…`);
+	const byServer = new Map<string, ClientState[]>();
+	for (const inst of r.manager.all) {
+		if (!STATE_STYLE[inst.client.state]) continue;
+		const states = byServer.get(inst.server.name) ?? [];
+		states.push(inst.client.state);
+		byServer.set(inst.server.name, states);
+	}
+	if (byServer.size === 0) return paint("dim", "LSP idle");
+	const parts = [...byServer].map(([name, states]) => {
+		const shown: ClientState = states.includes("error") ? "error" : states.includes("starting") ? "starting" : "running";
+		const style = STATE_STYLE[shown]!;
+		return paint(style.color, `${name} ${style.mark}${states.length > 1 ? `×${states.length}` : ""}`);
+	});
+	return paint("dim", "LSP ") + parts.join(paint("dim", " · "));
 }

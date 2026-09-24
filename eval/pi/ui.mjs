@@ -2,6 +2,7 @@
 // G-2、G-6 验收：真实 pi 里的安装确认与 /lsp 命令。
 //   G-2：交互模式（RPC，ctx.hasUI 为真）下安装前先弹确认，拒绝则不装、只返回安装说明，同意则装好并继续完成请求；非交互模式（-p）未开 autoInstall 时不装，开了之后自动装。
 //   G-6：/lsp 列出实例的状态、进程号与项目根；/lsp restart 之后换成新进程且旧进程已退出。
+//   状态栏：会话开始写 LSP idle，安装期间写 installing，服务器就绪后写 pyright ✓（比较前去掉颜色控制符）。
 // 用空的临时 agent 目录（只链接登录信息与模型配置）和只含系统目录的 PATH，让 pyright 处于「没装」状态；安装是真实的 npm 安装（联网，调用模型）。
 // 用法：node eval/pi/ui.mjs
 
@@ -122,6 +123,10 @@ let rpcB;
 	const asked = rpcB.events.some((e) => e.type === "extension_ui_request" && e.method === "confirm");
 	const hovered = rpcB.events.some((e) => e.type === "tool_execution_end" && JSON.stringify(e.result ?? "").includes("Hover info at 1:1"));
 	record("G-2 交互模式同意安装", asked && installed(agentA) && hovered, `弹出确认：${asked}；已安装到临时 agent 目录：${installed(agentA)}；装好后同一次调用拿到 hover：${hovered}`);
+	const statuses = rpcB.events.filter((e) => e.type === "extension_ui_request" && e.method === "setStatus" && e.statusKey === "zz-pi-lsp").map((e) => String(e.statusText ?? "").replace(/\x1b\[[0-9;]*m/g, ""));
+	const sawInstalling = statuses.some((t) => /^LSP installing /.test(t));
+	const sawRunning = statuses.some((t) => /pyright ✓/.test(t));
+	record("状态栏跟随实例状态", statuses[0] === "LSP idle" && sawInstalling && sawRunning, `依次写入：${JSON.stringify(statuses)}`);
 }
 
 // G-6：/lsp 与 /lsp restart。
