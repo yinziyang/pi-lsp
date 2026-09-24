@@ -30,7 +30,7 @@ function client(script: Script, over: Partial<ConstructorParameters<typeof LspCl
 	return { c, crashes, diags, refreshes: () => refreshes };
 }
 
-test("B-2 initialize 的能力声明与 Claude Code 一致，另加拉取诊断", async () => {
+test("B-2 initialize 的能力声明与 Claude Code 一致，另加拉取诊断（D3）与进度（D13）", async () => {
 	const log = join(tempDir(), "log");
 	const { c } = client({ log });
 	await c.start();
@@ -46,10 +46,11 @@ test("B-2 initialize 的能力声明与 Claude Code 一致，另加拉取诊断"
 	assert.equal(cap.textDocument.documentSymbol.hierarchicalDocumentSymbolSupport, true);
 	assert.deepEqual(cap.textDocument.publishDiagnostics.tagSupport, { valueSet: [1, 2] });
 	assert.ok(cap.textDocument.diagnostic, "D3：声明拉取诊断");
+	assert.deepEqual(cap.window, { workDoneProgress: true }, "D13：声明进度，服务器才会发启动阶段的进度");
 	await c.stop();
 });
 
-test("pullDiagnostics: false 时不声明拉取诊断，能力声明与 Claude Code 完全相同", async () => {
+test("pullDiagnostics: false 时不声明拉取诊断，只多出 D13 的进度声明", async () => {
 	const log = join(tempDir(), "log");
 	const { c } = client({ log, diagnostics: "pull" }, { pullDiagnostics: false });
 	await c.start();

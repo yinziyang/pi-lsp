@@ -110,6 +110,7 @@ pi install git:https://github.com/yinziyang/pi-lsp.git
 | D10 | 只能经 Claude Code 插件配置，不安装服务器 | 内置服务器表，可在 pi 设置里覆盖；缺的服务器可以安装 |
 | D11 | 插件装了就算有服务器 | 命令能找到才算有服务器；一个都没有时不注册工具 |
 | D12 | 子代理的诊断转给主会话 | 后台子代理的诊断送给它自己（pi 的后台子代理是独立进程） |
+| D13 | 服务器刚启动就查询，拿到的结果可能不完整（TS 只返回当前文件里的引用，rust-analyzer 返回空，pyright 只返回 1 条），且不报错 | 服务器启动后的第一次查询先等它就绪：启动至少 1 秒、启动阶段的进度全部结束、250ms 内没有新进度，最多等 10 秒；为此在 initialize 里声明 `window.workDoneProgress`。之后的查询不再等 |
 
 改变模型看到的内容：
 
@@ -136,6 +137,8 @@ pi install git:https://github.com/yinziyang/pi-lsp.git
 - rust-analyzer 在会话里第一次编辑后，自身分析给出的诊断可能晚一轮才到；`cargo check` 的诊断照常送达。
 - 编辑后某一路诊断 8 秒内没有重新上报时按清空处理；`cargo check` 很慢且仍有错误时，会先报「已消失」、随后再报那条错误。
 - clangd 在没有 `compile_commands.json` 的真实项目里会按默认编译参数解析，可能报找不到头文件；这是 clangd 自身的限制。
+- clangd 没有 `compile_commands.json` 时不索引没打开的文件，findReferences 只能找到已打开文件里的引用。
+- 每个服务器启动后的第一次查询会多等 1 到 3 秒（D13），换来完整的结果。
 - 模型会不会主动用 `lsp` 取决于模型：gpt-6-sol 在「找调用处」这类问题上每轮都会先 grep 定位、再用 lsp 查引用；deepseek-v4.1-flash 即使有系统提示引导也基本只用 grep。
 
 ## 开发与测试

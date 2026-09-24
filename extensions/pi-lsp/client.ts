@@ -18,6 +18,23 @@ import { fileUri } from "./uri.ts";
 
 export type ClientState = "stopped" | "starting" | "running" | "stopping" | "error";
 
+/**
+ * D13：导航请求前等实例就绪的参数，毫秒。
+ * 服务器刚启动、还在加载工程时，导航请求不报错，而是静默返回不完整的结果：
+ * 实测 typescript-language-server 在「Initializing JS/TS language features」进度结束前只返回当前文件里的引用，rust-analyzer 在启动那一串进度结束前返回空，pyright 不发进度、启动约 1 秒内只返回 1 条。
+ * 就绪条件：进入 running 至少 minMs，启动阶段开始的进度全部结束，且 quietMs 内没有新进度（rust-analyzer 的进度一个接一个，中间有几十毫秒的空档）；最多等 maxMs，到了照常查询。
+ */
+export interface Readiness {
+	minMs: number;
+	quietMs: number;
+	maxMs: number;
+}
+
+export const DEFAULT_READINESS: Readiness = { minMs: 1000, quietMs: 250, maxMs: 10_000 };
+
+/** 就绪等待的轮询间隔，毫秒。 */
+const READY_POLL_MS = 25;
+
 export interface ClientOptions {
 	/** 服务器名，用于报错文本，例如 gopls。 */
 	name: string;
@@ -45,6 +62,8 @@ export interface ClientOptions {
 	onCrash: (error: Error) => void;
 	/** 状态每变化一次调用一次，用于刷新界面上的状态显示；不传参数，调用方自己读 state。 */
 	onStateChange?: () => void;
+	/** 导航请求前的就绪等待，默认 DEFAULT_READINESS。 */
+	readiness?: Readiness;
 }
 
 /** 关闭流程第二步：发 exit 后等进程退出的上限。 */
@@ -72,7 +91,11 @@ export function configurationValue(settings: unknown, section: string | undefine
 	return cur ?? null;
 }
 
-/** initialize 请求参数。能力声明与 Claude Code 相同，pull 为 true 时另加拉取诊断（D3）。 */
+/**
+ * initialize 请求参数。能力声明与 Claude Code 相同，另有两处增加：
+ *   - pull 为 true 时声明拉取诊断（D3）。
+ *   - 声明 window.workDoneProgress（D13）：不声明时 typescript-language-server 等不发启动进度，就绪等待就无从判断工程何时加载完。
+ */
 export function initializeParams(root: string, initializationOptions: unknown, hasSettings: boolean, pull = true): InitializeParams {
 	const uri = fileUri(root);
 	const params = {
@@ -95,6 +118,7 @@ export function initializeParams(root: string, initializationOptions: unknown, h
 				diagnostic: { dynamicRegistration: true, relatedDocumentSupport: false },
 			},
 			general: { positionEncodings: ["utf-16"] },
+			window: { workDoneProgress: true },
 		},
 	} as InitializeParams & { capabilities: { workspace: Record<string, unknown>; textDocument: Record<string, unknown> } };
 	if (!pull) {
@@ -123,6 +147,13 @@ export class LspClient {
 	private stopping: Promise<void> | undefined;
 	private stderrTail = "";
 	private current: ClientState = "stopped";
+	/** 进入 running 的时刻，就绪等待从这里算起。 */
+	private runningAt = 0;
+	/** 启动阶段已经结束：之后的进度（例如编辑后的重新分析）不再参与就绪判断。 */
+	private settled = false;
+	/** 启动阶段开始、还没结束的进度 token。 */
+	private readonly startupProgress = new Set<string>();
+	private lastProgressAt = 0;
 	capabilities: ServerCapabilities = {};
 	lastError: Error | undefined;
 	/** 服务器通过 client/registerCapability 动态注册的方法名。 */
@@ -163,6 +194,9 @@ export class LspClient {
 	async start(): Promise<void> {
 		const o = this.opts;
 		this.setState("starting");
+		this.settled = false;
+		this.startupProgress.clear();
+		this.lastProgressAt = 0;
 		this.lastError = undefined;
 		this.stderrTail = "";
 		this.registrations.clear();
@@ -199,6 +233,7 @@ export class LspClient {
 			this.capabilities = result?.capabilities ?? {};
 			await conn.sendNotification("initialized", {});
 			if (o.settings !== undefined) await conn.sendNotification("workspace/didChangeConfiguration", { settings: o.settings });
+			this.runningAt = Date.now();
 			this.setState("running");
 		} catch (e) {
 			// 初始化期间进程退出时，onExit 已记下退出码与 stderr，比「连接已释放」更能说明原因，优先用它。
@@ -224,6 +259,7 @@ export class LspClient {
 			return null;
 		});
 		conn.onRequest("window/workDoneProgress/create", () => null);
+		conn.onNotification("$/progress", (p: { token?: unknown; value?: { kind?: string } }) => this.onProgress(String(p?.token), p?.value?.kind));
 		conn.onRequest("window/showMessageRequest", () => null);
 		conn.onRequest("workspace/workspaceFolders", () => [{ uri: fileUri(o.root), name: basename(o.root) }]);
 		conn.onRequest("workspace/diagnostic/refresh", () => {
@@ -237,6 +273,38 @@ export class LspClient {
 			return new ResponseError(-32601, `Unhandled method ${method}`);
 		});
 		conn.onNotification(() => {});
+	}
+
+	/** 记录启动阶段的进度；诊断类进度（token 含 flycheck，例如 rust-analyzer 的 cargo check）与导航是否就绪无关，不记。 */
+	private onProgress(token: string, kind: string | undefined): void {
+		if (this.settled || token.includes("flycheck")) return;
+		const r = this.opts.readiness ?? DEFAULT_READINESS;
+		if (this.runningAt > 0 && Date.now() - this.runningAt >= r.maxMs) {
+			this.settled = true;
+			return;
+		}
+		if (kind === "begin") this.startupProgress.add(token);
+		else if (kind === "end") this.startupProgress.delete(token);
+		this.lastProgressAt = Date.now();
+	}
+
+	/**
+	 * D13：等实例就绪后再发导航请求，条件见 Readiness。
+	 * 只有启动后的第一次调用会真正等待，就绪之后立即返回；每次重启重新计算。
+	 * 取消信号触发或实例不再运行时立即返回，由随后的请求报告取消或状态错误。
+	 */
+	async whenReady(signal?: AbortSignal): Promise<void> {
+		const r = this.opts.readiness ?? DEFAULT_READINESS;
+		while (!this.settled && this.state === "running" && !signal?.aborted) {
+			const now = Date.now();
+			const up = now - this.runningAt;
+			const quiet = this.startupProgress.size === 0 && now - this.lastProgressAt >= r.quietMs;
+			if (up >= r.maxMs || (up >= r.minMs && quiet)) {
+				this.settled = true;
+				return;
+			}
+			await sleep(READY_POLL_MS);
+		}
 	}
 
 	/** 协议违规或连接错误：终止进程并按崩溃处理。 */

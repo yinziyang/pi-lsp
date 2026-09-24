@@ -6,6 +6,7 @@
 //   - references 带 includeDeclaration: true；incoming / outgoing 先 prepareCallHierarchy 再用第一项查询。
 //   - 定义、引用、实现、工作区符号的结果用 git check-ignore 过滤掉被忽略的路径。
 // 有意偏离 V4：工具说明末尾加一句使用引导。
+// 有意偏离 D13：服务器启动后的第一次查询先等它就绪（见 client.ts 的 Readiness），Claude Code 不等，冷启动时会拿到不完整的结果。
 
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
@@ -152,6 +153,8 @@ export async function runLsp(rt: ToolRuntime, p: LspParams, signal?: AbortSignal
 		await rt.manager.ensureRunning(inst);
 		const tooLarge = await rt.manager.openForQuery(inst, abs);
 		if (tooLarge) return tooLarge;
+		// D13：服务器刚启动时先等它加载完工程，否则引用、定义等会静默返回不完整的结果；只有启动后的第一次查询会等。
+		await inst.client.whenReady(signal);
 		const { method, params } = requestFor(p, abs);
 		let result = await rt.manager.request<unknown>(inst, method, params, signal);
 		if (p.operation === "incomingCalls" || p.operation === "outgoingCalls") {

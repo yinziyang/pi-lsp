@@ -22,6 +22,8 @@
 //   hugeHeader          initialized 之后发一个超长消息头
 //   hugeBody            initialized 之后发一个声明正文超过 32MB 的消息头
 //   spawnChild          起一个换了进程组的 sleep 子进程，测试进程树清理
+//   progress            initialized 之后按时间表发进度：[{token, beginMs, endMs?}]，先发 window/workDoneProgress/create，没有 endMs 的永不结束
+//   warmup              {ms, responses}：initialized 之后 ms 毫秒内，按 warmup.responses 回复（模拟服务器还在加载工程时返回的不完整结果）
 
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
@@ -31,6 +33,7 @@ const log = (o) => { if (S.log) appendFileSync(S.log, JSON.stringify({ t: Date.n
 const docs = new Map();
 const cmCount = {};
 let nextId = 1000;
+let initializedAt = 0;
 
 if (S.ignoreTerm) process.on("SIGTERM", () => log({ ev: "sigterm-ignored" }));
 
@@ -91,7 +94,9 @@ function onRequest(msg) {
 		send({ id, result: { kind: "full", items: diagsFor(doc?.text ?? "") } });
 		return;
 	}
-	const result = S.responses && method in S.responses ? S.responses[method] : null;
+	const warm = S.warmup && Date.now() - initializedAt < S.warmup.ms && method in S.warmup.responses;
+	const table = warm ? S.warmup.responses : S.responses;
+	const result = table && method in table ? table[method] : null;
 	send({ id, result });
 }
 
@@ -99,6 +104,12 @@ function onNotification(msg) {
 	const { method, params } = msg;
 	log({ ev: "notify", method, uri: params?.textDocument?.uri, version: params?.textDocument?.version, languageId: params?.textDocument?.languageId, settings: params?.settings });
 	if (method === "initialized") {
+		initializedAt = Date.now();
+		for (const p of S.progress || []) {
+			send({ id: nextId++, method: "window/workDoneProgress/create", params: { token: p.token } });
+			setTimeout(() => send({ method: "$/progress", params: { token: p.token, value: { kind: "begin", title: "Loading" } } }), p.beginMs ?? 0);
+			if (p.endMs !== undefined) setTimeout(() => send({ method: "$/progress", params: { token: p.token, value: { kind: "end" } } }), p.endMs);
+		}
 		for (const r of S.serverRequests || []) send({ id: nextId++, method: r.method, params: r.params ?? {} });
 		if (S.crashAfterMs !== undefined) setTimeout(() => process.exit(3), S.crashAfterMs);
 		if (S.garbage) setTimeout(() => process.stdout.write("this is not an LSP message\n".repeat(4)), 50);

@@ -8,15 +8,18 @@ import { test } from "node:test";
 import type { LspSettings, ServerConfig } from "../extensions/pi-lsp/config.ts";
 import { DiagnosticsHub } from "../extensions/pi-lsp/diagnostics.ts";
 import { installHint, installPlan, runInstall, type Exec } from "../extensions/pi-lsp/install.ts";
-import { ServerManager } from "../extensions/pi-lsp/manager.ts";
+import { type ManagerOptions, ServerManager } from "../extensions/pi-lsp/manager.ts";
 import { Router } from "../extensions/pi-lsp/routing.ts";
 import { PROMPT_GUIDELINES, PROMPT_SNIPPET, TOOL_DESCRIPTION, createLspTool, runLsp, type ToolRuntime } from "../extensions/pi-lsp/tool.ts";
 import { fakeServer, readLog, tempDir, writeFile } from "./fixtures.ts";
 
-function runtime(servers: ServerConfig[], cwd = tempDir(), onMissing?: ToolRuntime["onMissing"]): ToolRuntime & { manager: ServerManager } {
+/** 就绪等待默认最少 1 秒；测试里除专门测它的用例外都关掉，免得每个用例多等 1 秒。 */
+const NO_WAIT = { minMs: 0, quietMs: 0, maxMs: 0 };
+
+function runtime(servers: ServerConfig[], cwd = tempDir(), onMissing?: ToolRuntime["onMissing"], readiness: ManagerOptions["readiness"] = NO_WAIT): ToolRuntime & { manager: ServerManager } {
 	const settings: LspSettings = { servers, idleTimeoutMs: 60_000, autoInstall: false, diagnostics: true };
 	const router = new Router(servers, { cwd, toolDirs: [], env: process.env });
-	const manager = new ServerManager({ router, settings, hub: new DiagnosticsHub(cwd) });
+	const manager = new ServerManager({ router, settings, hub: new DiagnosticsHub(cwd), readiness });
 	return { manager, cwd, onMissing: onMissing ?? (async () => ({ installed: false, note: "" })) };
 }
 
@@ -167,4 +170,64 @@ test("G-2 安装执行：按步骤执行，失败即停并带上输出", async (
 	assert.equal(r.ok, false);
 	assert.equal(calls.length, 2, "第二步失败后不再执行第三步");
 	assert.match(r.output, /boom/);
+});
+
+// D13：服务器刚启动、还在加载工程时，导航请求会静默返回不完整的结果（实测 typescript-language-server 只返回当前文件里的引用，rust-analyzer 返回空，pyright 只返回 1 条）。
+// 第一次导航请求前先等实例就绪：启动后至少 minMs，启动阶段开始的进度全部结束，且 quietMs 内没有新进度；最多等 maxMs。
+const loc = (cwd: string, name: string, line: number) => ({ uri: `file://${join(cwd, name)}`, range: range(line) });
+const refsScript = (cwd: string, extra: Record<string, unknown>) => ({
+	responses: { "textDocument/references": [loc(cwd, "a.fake", 0), loc(cwd, "b.fake", 1), loc(cwd, "c.fake", 2)] },
+	warmup: { ms: 600, responses: { "textDocument/references": [loc(cwd, "a.fake", 0)] } },
+	...extra,
+});
+
+test("D13 启动阶段有进度时，等进度结束再查，拿到完整结果", async () => {
+	const cwd = tempDir();
+	writeFile(cwd, "a.fake", "x");
+	const rt = runtime([fakeServer("fake", refsScript(cwd, { progress: [{ token: "load", beginMs: 0, endMs: 600 }] }))], cwd, undefined, { minMs: 100, quietMs: 100, maxMs: 5000 });
+	const out = await runLsp(rt, { operation: "findReferences", filePath: "a.fake", line: 1, character: 1 });
+	assert.match(out, /^Found 3 references across 3 files:/, out);
+	await rt.manager.shutdownAll();
+});
+
+test("D13 服务器不发进度时，启动后至少等 minMs 再查", async () => {
+	const cwd = tempDir();
+	writeFile(cwd, "a.fake", "x");
+	const rt = runtime([fakeServer("fake", refsScript(cwd, {}))], cwd, undefined, { minMs: 800, quietMs: 100, maxMs: 5000 });
+	const out = await runLsp(rt, { operation: "findReferences", filePath: "a.fake", line: 1, character: 1 });
+	assert.match(out, /^Found 3 references/, out);
+	await rt.manager.shutdownAll();
+});
+
+test("D13 进度一直不结束时最多等 maxMs，照常返回结果", async () => {
+	const cwd = tempDir();
+	writeFile(cwd, "a.fake", "x");
+	const rt = runtime([fakeServer("fake", refsScript(cwd, { progress: [{ token: "stuck", beginMs: 0 }] }))], cwd, undefined, { minMs: 100, quietMs: 100, maxMs: 900 });
+	const t0 = Date.now();
+	const out = await runLsp(rt, { operation: "findReferences", filePath: "a.fake", line: 1, character: 1 });
+	assert.ok(Date.now() - t0 < 3000, `等待超过上限：${Date.now() - t0}ms`);
+	assert.match(out, /^Found 3 references/, "900ms 时 warmup 已过，拿到完整结果");
+	await rt.manager.shutdownAll();
+});
+
+test("D13 诊断类进度（token 含 flycheck，例如 rust-analyzer 的 cargo check）不参与就绪判断", async () => {
+	const cwd = tempDir();
+	writeFile(cwd, "a.fake", "x");
+	const rt = runtime([fakeServer("fake", { progress: [{ token: "rust-analyzer/flycheck/0", beginMs: 0 }] })], cwd, undefined, { minMs: 100, quietMs: 100, maxMs: 5000 });
+	const t0 = Date.now();
+	await runLsp(rt, { operation: "hover", filePath: "a.fake", line: 1, character: 1 });
+	assert.ok(Date.now() - t0 < 2000, `被 flycheck 进度拖住：${Date.now() - t0}ms`);
+	await rt.manager.shutdownAll();
+});
+
+test("D13 只等一次：就绪之后才开始的进度不再等待", async () => {
+	const cwd = tempDir();
+	writeFile(cwd, "a.fake", "x");
+	const rt = runtime([fakeServer("fake", { progress: [{ token: "later", beginMs: 700 }] })], cwd, undefined, { minMs: 100, quietMs: 100, maxMs: 5000 });
+	await runLsp(rt, { operation: "hover", filePath: "a.fake", line: 1, character: 1 });
+	await new Promise((r) => setTimeout(r, 900));
+	const t0 = Date.now();
+	await runLsp(rt, { operation: "hover", filePath: "a.fake", line: 1, character: 1 });
+	assert.ok(Date.now() - t0 < 500, `就绪后的进度仍在等待：${Date.now() - t0}ms`);
+	await rt.manager.shutdownAll();
 });

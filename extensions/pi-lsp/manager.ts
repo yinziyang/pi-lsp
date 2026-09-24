@@ -8,7 +8,7 @@
 
 import { readFile, stat } from "node:fs/promises";
 import type { LspSettings, ServerConfig } from "./config.ts";
-import { LspClient } from "./client.ts";
+import { LspClient, type Readiness } from "./client.ts";
 import type { DiagnosticsHub } from "./diagnostics.ts";
 import { DocumentSet, MAX_FILE_BYTES } from "./documents.ts";
 import type { PidRegistry } from "./process.ts";
@@ -51,6 +51,8 @@ export interface ManagerOptions {
 	log?: (message: string) => void;
 	/** 任一实例的状态变化时调用（启动、就绪、崩溃、关闭），用于刷新状态栏；调用方自己读 all。 */
 	onChange?: () => void;
+	/** 导航请求前的就绪等待（D13），默认 DEFAULT_READINESS；测试里调小或关掉。 */
+	readiness?: Readiness;
 }
 
 export class ServerManager {
@@ -116,6 +118,7 @@ export class ServerManager {
 			},
 			onDiagnosticsRefresh: () => void this.pullOpen(inst),
 			onStateChange: () => this.opts.onChange?.(),
+			readiness: this.opts.readiness,
 			onCrash: (err) => {
 				inst.failures++;
 				inst.crashed = true;

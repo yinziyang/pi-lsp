@@ -4,6 +4,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { Readiness } from "../../extensions/pi-lsp/client.ts";
 import { loadSettings, type LspSettings } from "../../extensions/pi-lsp/config.ts";
 import { DiagnosticsHub } from "../../extensions/pi-lsp/diagnostics.ts";
 import { ServerManager } from "../../extensions/pi-lsp/manager.ts";
@@ -49,7 +50,8 @@ export interface Session {
 	close(): Promise<void>;
 }
 
-export function session(root: string, cwd = root): Session {
+/** readiness 不传时用默认的就绪等待（D13）；传 { minMs: 0, quietMs: 0, maxMs: 0 } 可关掉，用来对照冷启动的问题。 */
+export function session(root: string, cwd = root, readiness?: Readiness): Session {
 	const agentDir = mkdtempSync(join(tmpdir(), "pi-lsp-agent-"));
 	const { settings } = loadSettings({ agentDir, cwd, trusted: false });
 	// npm run 会把本仓库的 node_modules/.bin 放到 PATH 最前，里面的 tsc 是开发依赖的 TS 5，会改变 TS 服务器的选择；去掉它，模拟用户的环境。
@@ -64,7 +66,7 @@ export function session(root: string, cwd = root): Session {
 			orig(uri, ch, d, provisional);
 		};
 	}
-	const manager = new ServerManager({ router, settings, hub });
+	const manager = new ServerManager({ router, settings, hub, readiness });
 	const rt = { manager, cwd, onMissing: async () => ({ installed: false, note: "" }) };
 	const s: Session = {
 		root,
