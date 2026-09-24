@@ -15,6 +15,11 @@ import type { PidRegistry } from "./process.ts";
 import type { Launch, Router } from "./routing.ts";
 import { fileUri, uriToPath } from "./uri.ts";
 
+/** LSP 3.17 的 ServerCancelled 错误码；拉取诊断遇到它时重试，最多 3 次，间隔 500ms、1s、2s。 */
+const SERVER_CANCELLED = -32802;
+const PULL_RETRIES = 3;
+const PULL_RETRY_BASE_MS = 500;
+
 export interface Instance {
 	key: string;
 	server: ServerConfig;
@@ -98,6 +103,7 @@ export class ServerManager {
 			startupTimeout: server.startupTimeout,
 			requestTimeout: server.requestTimeout,
 			shutdownTimeout: server.shutdownTimeout,
+			pullDiagnostics: server.pullDiagnostics,
 			registry: this.opts.registry,
 			onDiagnostics: (p) => {
 				if (!this.diagnosticsOn(server)) return;
@@ -192,15 +198,27 @@ export class ServerManager {
 		return inst;
 	}
 
-	/** D3：拉取一个文件的诊断。服务器不支持或请求失败时静默跳过。 */
+	/**
+	 * D3：拉取一个文件的诊断。服务器不支持或请求失败时静默跳过。
+	 * 实测 rust-analyzer 在编辑后立即被拉取时会先回空结果，分析完才发 workspace/diagnostic/refresh；
+	 * 对这类服务器，空的拉取结果只算临时结果，不结束编辑后的等待，由刷新后的那次拉取给出真结果。
+	 */
 	async pull(inst: Instance, path: string): Promise<void> {
 		if (!this.diagnosticsOn(inst.server) || !inst.client.supportsPullDiagnostics || inst.client.state !== "running") return;
-		try {
-			const uri = fileUri(path);
-			const r = await this.request<{ kind?: string; items?: import("vscode-languageserver-protocol").Diagnostic[] }>(inst, "textDocument/diagnostic", { textDocument: { uri } });
-			if (r && r.kind === "full" && Array.isArray(r.items)) this.opts.hub.receive(uri, `${inst.key}\u0000pull`, r.items);
-		} catch {
-			// 拉取失败不影响推送诊断与导航。
+		const uri = fileUri(path);
+		for (let attempt = 0; attempt <= PULL_RETRIES; attempt++) {
+			try {
+				const r = await this.request<{ kind?: string; items?: import("vscode-languageserver-protocol").Diagnostic[] }>(inst, "textDocument/diagnostic", { textDocument: { uri } });
+				if (r && r.kind === "full" && Array.isArray(r.items)) {
+					const provisional = r.items.length === 0 && inst.client.usesDiagnosticRefresh;
+					this.opts.hub.receive(uri, `${inst.key}\u0000pull`, r.items, provisional);
+				}
+				return;
+			} catch (e) {
+				// ServerCancelled：服务器在计算途中发现文件又变了，按 LSP 3.17 的约定由客户端重试。实测 rust-analyzer 在连续编辑时会这样回。
+				if ((e as { code?: number }).code !== SERVER_CANCELLED || attempt === PULL_RETRIES || inst.client.state !== "running") return;
+				await new Promise((r) => setTimeout(r, PULL_RETRY_BASE_MS * 2 ** attempt));
+			}
 		}
 	}
 

@@ -15,6 +15,7 @@
 //   responses           {method: result} 请求的固定返回
 //   neverRespond        [method] 永不回复
 //   contentModified     {method: n} 前 n 次回 -32801
+//   serverCancelled     {method: n} 前 n 次回 -32802
 //   ignoreShutdown / ignoreExit / ignoreTerm / ignoreEof  忽略相应的关闭信号
 //   crashAfterMs        initialized 之后多久以退出码 3 退出
 //   garbage             initialized 之后往 stdout 写非协议文本
@@ -77,6 +78,11 @@ function onRequest(msg) {
 	if (S.contentModified && S.contentModified[method] > (cmCount[method] ?? 0)) {
 		cmCount[method] = (cmCount[method] ?? 0) + 1;
 		send({ id, error: { code: -32801, message: "content modified" } });
+		return;
+	}
+	if (S.serverCancelled && S.serverCancelled[method] > (cmCount[`sc:${method}`] ?? 0)) {
+		cmCount[`sc:${method}`] = (cmCount[`sc:${method}`] ?? 0) + 1;
+		send({ id, error: { code: -32802, message: "server cancelled", data: { retriggerRequest: true } } });
 		return;
 	}
 	if (method === "textDocument/diagnostic") {

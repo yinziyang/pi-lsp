@@ -35,6 +35,8 @@ export interface ClientOptions {
 	requestTimeout: number;
 	/** 关闭流程第一步 shutdown 请求的等待上限，毫秒。 */
 	shutdownTimeout: number;
+	/** 是否声明支持拉取诊断（D3）。 */
+	pullDiagnostics: boolean;
 	registry?: PidRegistry;
 	onDiagnostics: (params: PublishDiagnosticsParams) => void;
 	/** 服务器要求客户端重新拉取诊断。 */
@@ -68,10 +70,10 @@ export function configurationValue(settings: unknown, section: string | undefine
 	return cur ?? null;
 }
 
-/** initialize 请求参数。能力声明与 Claude Code 相同，另加拉取诊断（D3）。 */
-export function initializeParams(root: string, initializationOptions: unknown, hasSettings: boolean): InitializeParams {
+/** initialize 请求参数。能力声明与 Claude Code 相同，pull 为 true 时另加拉取诊断（D3）。 */
+export function initializeParams(root: string, initializationOptions: unknown, hasSettings: boolean, pull = true): InitializeParams {
 	const uri = fileUri(root);
-	return {
+	const params = {
 		processId: process.pid,
 		clientInfo: { name: "pi-lsp", version: VERSION },
 		initializationOptions: initializationOptions ?? {},
@@ -92,7 +94,12 @@ export function initializeParams(root: string, initializationOptions: unknown, h
 			},
 			general: { positionEncodings: ["utf-16"] },
 		},
-	} as InitializeParams;
+	} as InitializeParams & { capabilities: { workspace: Record<string, unknown>; textDocument: Record<string, unknown> } };
+	if (!pull) {
+		delete params.capabilities.workspace.diagnostics;
+		delete params.capabilities.textDocument.diagnostic;
+	}
+	return params;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -118,6 +125,8 @@ export class LspClient {
 	lastError: Error | undefined;
 	/** 服务器通过 client/registerCapability 动态注册的方法名。 */
 	readonly registrations = new Set<string>();
+	/** 服务器发过 workspace/diagnostic/refresh：它用刷新通知表示分析完成，编辑后立即拉取到的空结果可能还没分析完。 */
+	usesDiagnosticRefresh = false;
 
 	constructor(opts: ClientOptions) {
 		this.opts = opts;
@@ -131,8 +140,9 @@ export class LspClient {
 		return this.opts.name;
 	}
 
-	/** 服务器是否支持拉取诊断：初始化时声明，或之后动态注册。 */
+	/** 是否对这个服务器拉取诊断：我们声明了拉取，且服务器在初始化时声明或之后动态注册了。 */
 	get supportsPullDiagnostics(): boolean {
+		if (!this.opts.pullDiagnostics) return false;
 		return Boolean(this.capabilities.diagnosticProvider) || this.registrations.has("textDocument/diagnostic");
 	}
 
@@ -170,7 +180,7 @@ export class LspClient {
 		conn.listen();
 
 		try {
-			const init = conn.sendRequest("initialize", initializeParams(o.root, o.initializationOptions, o.settings !== undefined));
+			const init = conn.sendRequest("initialize", initializeParams(o.root, o.initializationOptions, o.settings !== undefined, o.pullDiagnostics));
 			const result = (await withTimeout(init, o.startupTimeout, `LSP server '${o.name}' timed out after ${o.startupTimeout}ms during initialization`)) as { capabilities?: ServerCapabilities };
 			if (this.state !== "starting") throw this.lastError ?? new Error("LSP server crashed during startup");
 			this.capabilities = result?.capabilities ?? {};
@@ -204,6 +214,7 @@ export class LspClient {
 		conn.onRequest("window/showMessageRequest", () => null);
 		conn.onRequest("workspace/workspaceFolders", () => [{ uri: fileUri(o.root), name: basename(o.root) }]);
 		conn.onRequest("workspace/diagnostic/refresh", () => {
+			this.usesDiagnosticRefresh = true;
 			o.onDiagnosticsRefresh();
 			return null;
 		});

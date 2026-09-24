@@ -88,6 +88,18 @@ test("C-4 拉取诊断：支持拉取的服务器编辑后被拉取，结果进�
 	await manager.shutdownAll();
 });
 
+test("C-4 拉取遇到 ServerCancelled 时重试，拿到结果", async () => {
+	const log = join(tempDir(), "log");
+	const { cwd, manager, hub } = setup([fakeServer("fake", { log, diagnostics: "pull", serverCancelled: { "textDocument/diagnostic": 2 } })]);
+	const file = writeFile(cwd, "a.fake", "ERROR here");
+	hub.markEdited(file);
+	await manager.syncEdited(file);
+	await hub.waitFor(file, 5000);
+	assert.match(hub.take()?.text ?? "", /error on line 1/);
+	assert.equal(readLog(log).filter((e) => e.method === "textDocument/diagnostic").length, 3, "两次被取消后第三次成功");
+	await manager.shutdownAll();
+});
+
 test("C-4 收到 workspace/diagnostic/refresh 后重新拉取已打开的文件", async () => {
 	const log = join(tempDir(), "log");
 	const { cwd, manager } = setup([fakeServer("fake", { log, diagnostics: "pull", serverRequests: [] })]);

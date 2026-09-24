@@ -9,8 +9,20 @@
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": false,
     "skipLibCheck": true,
-    "types": ["node"],
-    "lib": ["ES2023"]
+    "types": [
+      "node"
+    ],
+    "lib": [
+      "ES2023"
+    ]
   },
-  "include": ["extensions/**/*.ts", "test/**/*.ts", "eval/**/*.ts"]
+  "include": [
+    "extensions/**/*.ts",
+    "test/**/*.ts",
+    "eval/**/*.ts"
+  ],
+  "exclude": [
+    "eval/probe/fixtures",
+    "node_modules"
+  ]
 }

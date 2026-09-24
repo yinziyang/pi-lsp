@@ -1,8 +1,9 @@
 // 服务器配置：内置表、字段校验、与 pi 设置合并。
 //
-// 配置格式沿用 Claude Code 插件 .lsp.json 的字段，可以直接照抄 Claude Code 的插件配置；另外增加三个字段：
+// 配置格式沿用 Claude Code 插件 .lsp.json 的字段，可以直接照抄 Claude Code 的插件配置；另外增加四个字段：
 //   - requestTimeout：单个请求的超时（D2）。
 //   - rootMarkers：找项目根用的标记文件（D7），内置服务器的规则在 routing.ts。
+//   - pullDiagnostics：是否向服务器声明支持拉取诊断（D3）。
 //   - enabled：设为 false 可以关掉某个内置服务器。
 // 设置来源：pi 的 settings.json 与受信项目的 .pi/settings.json 里的 lsp 键，后者覆盖前者。
 
@@ -30,6 +31,11 @@ export interface ServerConfig {
 	maxRestarts: number;
 	/** 是否接收并送达这个服务器的诊断，默认 true。 */
 	diagnostics: boolean;
+	/**
+	 * 是否在 initialize 里声明支持拉取诊断（D3），默认 true。
+	 * 有的服务器看到客户端支持拉取就不再推送，拉取实现又有问题，这时关掉，回到与 Claude Code 相同的纯推送。
+	 */
+	pullDiagnostics: boolean;
 	rootMarkers: string[] | undefined;
 	/** 内置服务器且用户没有改过 command：启动命令由 routing.ts 按项目决定（例如 TS 的服务器选择）。 */
 	builtin: boolean;
@@ -72,7 +78,8 @@ const BUILTIN: Record<string, Raw> = {
 			".js": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".jsx": "javascriptreact",
 		},
 	},
-	pyright: { command: "pyright-langserver", args: ["--stdio"], extensionToLanguage: { ".py": "python", ".pyi": "python" } },
+	// pyright 1.1.414 在客户端声明拉取诊断后改走拉取，实测编辑后的第二次拉取不返回，所以不向它声明拉取，保持与 Claude Code 相同的推送。
+	pyright: { command: "pyright-langserver", args: ["--stdio"], extensionToLanguage: { ".py": "python", ".pyi": "python" }, pullDiagnostics: false },
 	css: { command: "vscode-css-language-server", args: ["--stdio"], extensionToLanguage: { ".css": "css", ".scss": "scss", ".less": "less" } },
 	html: { command: "vscode-html-language-server", args: ["--stdio"], extensionToLanguage: { ".html": "html", ".htm": "html" } },
 };
@@ -123,6 +130,7 @@ export function parseServerConfig(name: string, raw: Raw, builtin: boolean): { c
 			restartOnCrash: raw.restartOnCrash !== false,
 			maxRestarts: (raw.maxRestarts as number) ?? 3,
 			diagnostics: raw.diagnostics !== false,
+			pullDiagnostics: raw.pullDiagnostics !== false,
 			rootMarkers: raw.rootMarkers as string[] | undefined,
 			builtin,
 		},

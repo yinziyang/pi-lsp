@@ -73,18 +73,44 @@ test("C-8 之前报过诊断的文件编辑后变为零，送出一次「已消�
 	assert.equal(hub.take(), undefined, "从没报过诊断的文件不送");
 });
 
-test("C-8 推送与拉取两路结果都为空才算已消失", () => {
+test("C-8 推送与拉取两路：编辑前的旧结果不再送；每一路都重新报了空才算已消失", () => {
 	const hub = new DiagnosticsHub(cwd);
 	hub.receive(uri("lib.rs"), "pull", [d(0, "type error")]);
 	hub.receive(uri("lib.rs"), "push", [d(3, "cargo check error")]);
 	assert.ok(hub.take());
 	hub.markEdited("/w/p/lib.rs");
 	hub.receive(uri("lib.rs"), "pull", []);
-	assert.match(hub.take()?.text ?? "", /cargo check error/, "推送那一路仍有错误，不算消失");
-	hub.markEdited("/w/p/lib.rs");
+	assert.equal(hub.take(), undefined, "推送那一路还没重新上报：旧的 cargo check 错误不再送，也不下「已消失」的结论");
 	hub.receive(uri("lib.rs"), "push", []);
+	assert.match(hub.take()?.text ?? "", /lib\.rs: all previously reported issues are resolved/);
+	hub.markEdited("/w/p/lib.rs");
 	hub.receive(uri("lib.rs"), "pull", []);
+	hub.receive(uri("lib.rs"), "push", [d(5, "borrow error")]);
+	assert.match(hub.take()?.text ?? "", /borrow error/, "重新上报的错误照常送出");
+});
+
+test("C-8 编辑后某一路一直不重新上报时，超过上限按空处理，照样报「已消失」", async () => {
+	const hub = new DiagnosticsHub(cwd, 300, 200);
+	hub.receive(uri("lib.rs"), "push", [d(3, "cargo check error")]);
+	hub.receive(uri("lib.rs"), "pull", []);
+	assert.ok(hub.take());
+	hub.markEdited("/w/p/lib.rs");
+	hub.receive(uri("lib.rs"), "pull", []);
+	assert.equal(hub.take(), undefined);
+	await new Promise((r) => setTimeout(r, 300));
 	assert.match(hub.take()?.text ?? "", /all previously reported issues are resolved/);
+	hub.dispose();
+});
+
+test("C-9 临时的空结果不结束等待", async () => {
+	const hub = new DiagnosticsHub(cwd, 100);
+	hub.markEdited("/w/p/a.rs");
+	const t0 = Date.now();
+	setTimeout(() => hub.receive(uri("a.rs"), "pull", [], true), 20);
+	setTimeout(() => hub.receive(uri("a.rs"), "pull", [d(0, "real")]), 400);
+	await hub.waitFor("/w/p/a.rs", 3000);
+	assert.ok(Date.now() - t0 >= 480, "临时结果之后继续等到真结果");
+	assert.match(hub.take()?.text ?? "", /real/);
 });
 
 test("C-9 等待：收到后安静 300ms 就结束；一直没有结果时最多等上限", async () => {

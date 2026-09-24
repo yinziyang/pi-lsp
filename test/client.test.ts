@@ -21,6 +21,7 @@ function client(script: Script, over: Partial<ConstructorParameters<typeof LspCl
 		startupTimeout: 3000,
 		requestTimeout: 1000,
 		shutdownTimeout: 500,
+		pullDiagnostics: true,
 		onDiagnostics: (p) => diags.push(p),
 		onDiagnosticsRefresh: () => { refreshes++; },
 		onCrash: (e) => crashes.push(e),
@@ -45,6 +46,17 @@ test("B-2 initialize 的能力声明与 Claude Code 一致，另加拉取诊断"
 	assert.equal(cap.textDocument.documentSymbol.hierarchicalDocumentSymbolSupport, true);
 	assert.deepEqual(cap.textDocument.publishDiagnostics.tagSupport, { valueSet: [1, 2] });
 	assert.ok(cap.textDocument.diagnostic, "D3：声明拉取诊断");
+	await c.stop();
+});
+
+test("pullDiagnostics: false 时不声明拉取诊断，能力声明与 Claude Code 完全相同", async () => {
+	const log = join(tempDir(), "log");
+	const { c } = client({ log, diagnostics: "pull" }, { pullDiagnostics: false });
+	await c.start();
+	const cap = (readLog(log).find((e) => e.method === "initialize")?.params as { capabilities: Record<string, any> }).capabilities;
+	assert.equal(cap.textDocument.diagnostic, undefined);
+	assert.equal(cap.workspace.diagnostics, undefined);
+	assert.equal(c.supportsPullDiagnostics, false, "服务器声明了也不拉取");
 	await c.stop();
 });
 

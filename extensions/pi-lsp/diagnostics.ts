@@ -5,7 +5,8 @@
 // 每个文件 10 条、总共 30 条，按严重级别排序；已送达记录最多保留 500 个文件；正文超过 4000 字符截断。
 // 有意偏离：V1 写相对路径而不是 basename；V2 不送 Hint；V3 编辑后问题全部消失时报一行「已消失」；D5 编辑后可以等一小段时间收诊断。
 //
-// 通道：同一个文件可能同时有推送与拉取两路结果（rust-analyzer 的 cargo check 走推送，自身分析走拉取），分开记，判断「已消失」时要求所有通道都为空。
+// 通道：同一个文件可能同时有推送与拉取两路结果（rust-analyzer 的 cargo check 走推送，自身分析走拉取），分开记。
+// 编辑后各路旧结果标为过期，只有重新上报过的一路才参与新增判断；所有上报过的路都重新报了空，才算「已消失」。实测不这样做时，修好之后会把编辑前 cargo check 的旧错误再送一次。
 
 import type { Diagnostic as LspDiagnostic } from "vscode-languageserver-protocol";
 import { displayPath, fileUri, uriToPath } from "./uri.ts";
@@ -53,14 +54,29 @@ export interface RenderedDiagnostics {
 	issueCount: number;
 }
 
+interface ChannelResult {
+	diags: Diag[];
+	/** 编辑后重新上报过。编辑前的结果是旧版本的，不参与新增判断。 */
+	fresh: boolean;
+}
+
 interface FileState {
 	/** 每个通道的最新结果。 */
-	channels: Map<string, Diag[]>;
+	channels: Map<string, ChannelResult>;
 	/** 编辑后，这个文件之前送达过诊断（用于 V3）。 */
 	hadDelivered: boolean;
 	/** 编辑后是否已经收到过一次结果（用于 V3 与 D5 的等待）。 */
 	reportedSinceEdit: boolean;
+	/** 编辑后等待过期通道的定时器。 */
+	staleTimer?: NodeJS.Timeout;
 }
+
+/**
+ * 编辑后某一路超过这个时间还没重新上报，就不再等它，按空结果处理。
+ * 简化：固定 8 秒。实测 rust-analyzer 在连续编辑时，cargo check 那一路可能一直不重新推送，不设上限的话「已消失」永远出不来。
+ * 代价是 cargo check 比 8 秒更慢且仍有错误时，会先报「已消失」、随后再报错误；出现这种误报时，改为按服务器分别配置，或以 $/progress 的结束为准。
+ */
+export const STALE_CHANNEL_MS = 8000;
 
 type Waiter = { path: string; resolve: () => void; quiet?: NodeJS.Timeout };
 
@@ -74,11 +90,13 @@ export class DiagnosticsHub {
 	/** 待送的「已消失」文件。 */
 	private readonly resolved = new Set<string>();
 	private readonly waiters = new Set<Waiter>();
-	private quietMs = 300;
+	private readonly quietMs: number;
+	private readonly staleMs: number;
 
-	constructor(cwd: string, quietMs = 300) {
+	constructor(cwd: string, quietMs = 300, staleMs = STALE_CHANNEL_MS) {
 		this.cwd = cwd;
 		this.quietMs = quietMs;
+		this.staleMs = staleMs;
 	}
 
 	private state(path: string): FileState {
@@ -96,28 +114,52 @@ export class DiagnosticsHub {
 		const had = this.delivered.get(path);
 		s.hadDelivered = s.hadDelivered || Boolean(had && had.size > 0);
 		s.reportedSinceEdit = false;
+		for (const ch of s.channels.values()) ch.fresh = false;
 		this.delivered.delete(path);
 		this.pending.delete(path);
 		this.resolved.delete(path);
+		if (s.staleTimer) clearTimeout(s.staleTimer);
+		if (s.channels.size > 0) {
+			s.staleTimer = setTimeout(() => this.expireStale(path), this.staleMs);
+			s.staleTimer.unref();
+		}
 	}
 
-	/** 收到一路诊断结果。uri 为服务器给的文件 URI，channel 区分推送与拉取。 */
-	receive(uri: string, channel: string, diagnostics: LspDiagnostic[]): void {
+	/** 过期通道不再等待：按空结果处理后重新计算。 */
+	private expireStale(path: string): void {
+		const s = this.files.get(path);
+		if (!s) return;
+		for (const ch of s.channels.values()) {
+			if (!ch.fresh) {
+				ch.diags = [];
+				ch.fresh = true;
+			}
+		}
+		this.recompute(path, s);
+	}
+
+	/**
+	 * 收到一路诊断结果。uri 为服务器给的文件 URI，channel 区分推送与拉取。
+	 * provisional 表示这是可能还没分析完的临时结果（见 manager.ts 的拉取），它照常记录，但不结束编辑后的等待。
+	 */
+	receive(uri: string, channel: string, diagnostics: LspDiagnostic[], provisional = false): void {
 		const path = uriToPath(uri);
 		const s = this.state(path);
 		// V2：不送 Hint。
 		const diags = diagnostics.map(toDiag).filter((d) => d.severity !== "Hint");
-		s.channels.set(channel, diags);
-		s.reportedSinceEdit = true;
+		s.channels.set(channel, { diags, fresh: true });
 		this.recompute(path, s);
+		if (provisional) return;
+		s.reportedSinceEdit = true;
 		this.poke(path);
 	}
 
 	private recompute(path: string, s: FileState): void {
 		const all: Diag[] = [];
 		const seen = new Set<string>();
-		for (const list of s.channels.values()) {
-			for (const d of list) {
+		for (const ch of s.channels.values()) {
+			if (!ch.fresh) continue;
+			for (const d of ch.diags) {
 				const k = keyOf(d);
 				if (!seen.has(k)) {
 					seen.add(k);
@@ -127,8 +169,8 @@ export class DiagnosticsHub {
 		}
 		if (all.length === 0) {
 			this.pending.delete(path);
-			// V3：编辑前送达过诊断，编辑后所有通道都为空，报一次「已消失」。
-			if (s.hadDelivered) this.resolved.add(path);
+			// V3：编辑前送达过诊断，编辑后每一路都重新报了空，报一次「已消失」；还有没重新上报的通道就先不下结论。
+			if (s.hadDelivered && [...s.channels.values()].every((c) => c.fresh)) this.resolved.add(path);
 			return;
 		}
 		this.resolved.delete(path);
@@ -219,8 +261,9 @@ export class DiagnosticsHub {
 		}
 	}
 
-	/** 会话结束：放掉所有等待。 */
+	/** 会话结束：放掉所有等待与定时器。 */
 	dispose(): void {
 		for (const w of [...this.waiters]) w.resolve();
+		for (const s of this.files.values()) if (s.staleTimer) clearTimeout(s.staleTimer);
 	}
 }
