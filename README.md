@@ -134,6 +134,8 @@ npm run test:real            # 真实语言服务器：各语言的诊断、导�
 npm run test:install         # 真实安装：在空目录里安装各服务器并启动（联网）
 node eval/pi/lifecycle.mjs   # 真实 pi 里的生命周期：退出、kill -9、新建与切换会话、多会话、子代理进程（调用模型）
 node eval/pi/e2e.mjs         # 真实 pi 里的端到端与共存（调用模型）
+node eval/pi/ui.mjs          # 真实 pi 里的安装确认、非交互安装、/lsp 状态与重启（联网安装，调用模型）
+node eval/pi/compare.mjs     # 装与不装 pi-lsp 的对照：最终代码能否通过编译与类型检查（调用模型）
 node eval/parity/parity.ts   # 与 Claude Code 的 LSP 工具逐字节对比（需要 Claude Code 与官方 LSP 插件，调用模型）
 ```
 
