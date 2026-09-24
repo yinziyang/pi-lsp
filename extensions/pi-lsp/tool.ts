@@ -166,11 +166,25 @@ export async function runLsp(rt: ToolRuntime, p: LspParams, signal?: AbortSignal
 	}
 }
 
+/**
+ * 写进 pi 默认系统提示 Available tools 一节的工具简介。
+ * pi 只列出填了 promptSnippet 的自定义工具；不填时模型只看到 bash 的「ls, grep, find」与规则「Use bash for file operations like ls, rg, find」，导航类问题几乎都去 grep。
+ * 有意偏离 V4：Claude Code 的系统提示里没有这段。
+ */
+export const PROMPT_SNIPPET = "Code intelligence from language servers: definitions, references, hover, symbols, implementations, call hierarchy";
+
+/** 追加到系统提示 Guidelines 的使用引导（V4）：优先用 lsp，不可用时退回文本搜索，不写成绝对禁止。 */
+export const PROMPT_GUIDELINES = [
+	"Prefer the lsp tool to find where a symbol is defined, its references, its implementations, or its callers. Fall back to grep or rg when lsp reports no server for the file type or returns an error, and use them for plain-text searches such as strings, comments, or config keys.",
+];
+
 export function createLspTool(getRuntime: () => ToolRuntime | undefined): ToolDefinition<typeof Parameters> {
 	return {
 		name: "lsp",
 		label: "LSP",
 		description: TOOL_DESCRIPTION,
+		promptSnippet: PROMPT_SNIPPET,
+		promptGuidelines: PROMPT_GUIDELINES,
 		parameters: Parameters,
 		executionMode: "parallel",
 		async execute(_id, params, signal) {

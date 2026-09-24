@@ -10,7 +10,7 @@ import { DiagnosticsHub } from "../extensions/pi-lsp/diagnostics.ts";
 import { installHint, installPlan, runInstall, type Exec } from "../extensions/pi-lsp/install.ts";
 import { ServerManager } from "../extensions/pi-lsp/manager.ts";
 import { Router } from "../extensions/pi-lsp/routing.ts";
-import { TOOL_DESCRIPTION, createLspTool, runLsp, type ToolRuntime } from "../extensions/pi-lsp/tool.ts";
+import { PROMPT_GUIDELINES, PROMPT_SNIPPET, TOOL_DESCRIPTION, createLspTool, runLsp, type ToolRuntime } from "../extensions/pi-lsp/tool.ts";
 import { fakeServer, readLog, tempDir, writeFile } from "./fixtures.ts";
 
 function runtime(servers: ServerConfig[], cwd = tempDir(), onMissing?: ToolRuntime["onMissing"]): ToolRuntime & { manager: ServerManager } {
@@ -124,6 +124,17 @@ test("B-11 工具的参数定义与 Claude Code 一致，说明是原文加 V4 �
 	assert.ok(TOOL_DESCRIPTION.startsWith("Interact with Language Server Protocol (LSP) servers to get code intelligence features."));
 	assert.ok(TOOL_DESCRIPTION.includes("Note: LSP servers must be configured for the file type. If no server is available, an error will be returned."));
 	assert.ok(TOOL_DESCRIPTION.endsWith("Prefer this tool over grep when looking up where a symbol is defined, its references, its implementations, or its callers."));
+});
+
+test("B-11 V4：工具进入 pi 系统提示的工具列表，引导是优先用 lsp、不可用时退回 grep / rg", () => {
+	const tool = createLspTool(() => undefined);
+	// pi 只把填了 promptSnippet 的自定义工具列进 Available tools。
+	assert.equal(tool.promptSnippet, PROMPT_SNIPPET);
+	assert.deepEqual(tool.promptGuidelines, PROMPT_GUIDELINES);
+	assert.equal(PROMPT_GUIDELINES.length, 1);
+	assert.match(PROMPT_GUIDELINES[0], /^Prefer the lsp tool/);
+	assert.match(PROMPT_GUIDELINES[0], /Fall back to grep or rg when lsp reports no server/);
+	assert.doesNotMatch(PROMPT_GUIDELINES[0], /\b(never|must not|do not use)\b/i, "引导不写成绝对禁止");
 });
 
 test("G-3 安装计划：npm 类装进本扩展目录；缺 go、缺 rustup 时说清楚缺什么；clangd 只给说明", () => {

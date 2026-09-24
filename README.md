@@ -105,7 +105,7 @@ pi install git:https://github.com/yinziyang/pi-lsp.git
 | V1 | 诊断只写文件名 | 写相对路径 |
 | V2 | Hint 级别也送 | 不送 Hint |
 | V3 | 问题修好了不告诉模型 | 之前报过诊断、编辑后全部消失时报一行 `<路径>: all previously reported issues are resolved` |
-| V4 | 没有使用引导 | 工具说明末尾加一句：查定义、引用、实现、调用者时优先用 lsp 而不是 grep |
+| V4 | 没有使用引导 | 工具说明末尾加一句：查定义、引用、实现、调用者时优先用 lsp 而不是 grep；工具列进 pi 系统提示的 Available tools，并在 Guidelines 里加一条：优先用 lsp，lsp 没有服务器或出错时退回 grep / rg，纯文本搜索照常用 grep / rg |
 
 ## 生命周期
 
@@ -123,6 +123,7 @@ pi install git:https://github.com/yinziyang/pi-lsp.git
 - rust-analyzer 在会话里第一次编辑后，自身分析给出的诊断可能晚一轮才到；`cargo check` 的诊断照常送达。
 - 编辑后某一路诊断 8 秒内没有重新上报时按清空处理；`cargo check` 很慢且仍有错误时，会先报「已消失」、随后再报那条错误。
 - clangd 在没有 `compile_commands.json` 的真实项目里会按默认编译参数解析，可能报找不到头文件；这是 clangd 自身的限制。
+- 模型会不会主动用 `lsp` 取决于模型：gpt-6-sol 在「找调用处」这类问题上每轮都会先 grep 定位、再用 lsp 查引用；deepseek-v4.1-flash 即使有系统提示引导也基本只用 grep。
 
 ## 开发与测试
 
@@ -136,6 +137,7 @@ node eval/pi/lifecycle.mjs   # 真实 pi 里的生命周期：退出、kill -9�
 node eval/pi/e2e.mjs         # 真实 pi 里的端到端与共存（调用模型）
 node eval/pi/ui.mjs          # 真实 pi 里的安装确认、非交互安装、/lsp 状态与重启（联网安装，调用模型）
 node eval/pi/compare.mjs     # 装与不装 pi-lsp 的对照：最终代码能否通过编译与类型检查（调用模型）
+node eval/pi/nav.mjs 3 a=<pi-lsp 目录> b=<另一版本目录>   # 在你已装的扩展环境里比较不同版本，导航类问题上模型用 lsp 还是 grep（调用模型）
 node eval/parity/parity.ts   # 与 Claude Code 的 LSP 工具逐字节对比（需要 Claude Code 与官方 LSP 插件，调用模型）
 ```
 
