@@ -20,7 +20,7 @@ export type ClientState = "stopped" | "starting" | "running" | "stopping" | "err
 
 /**
  * D13：导航请求前等实例就绪的参数，毫秒。
- * 服务器刚启动、还在加载工程时，导航请求不报错，而是静默返回不完整的结果：
+ * 服务器刚启动、还在加载工程时，导航请求不报错，而是静默返回不完整的结果。
  * 实测 typescript-language-server 在「Initializing JS/TS language features」进度结束前只返回当前文件里的引用，rust-analyzer 在启动那一串进度结束前返回空，pyright 不发进度、启动约 1 秒内只返回 1 条。
  * 就绪条件：进入 running 至少 minMs，启动阶段开始的进度全部结束，且 quietMs 内没有新进度（rust-analyzer 的进度一个接一个，中间有几十毫秒的空档）；最多等 maxMs，到了照常查询。
  */
