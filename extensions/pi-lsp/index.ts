@@ -21,7 +21,7 @@ import { resolveCommand, Router } from "./routing.ts";
 import { createLspTool, type ToolRuntime } from "./tool.ts";
 
 const MESSAGE_TYPE = "lsp-diagnostics";
-/** D5：edit / write 之后等诊断的上限，毫秒，包含首次编辑时拉起服务器的时间。 */
+/** D5：edit / write 之后等诊断的上限，毫秒，包含首次编辑时拉起服务器的时间；安静窗口见 diagnostics.ts 的 QUIET_MS。 */
 const EDIT_WAIT_MS = 3000;
 
 interface Runtime extends ToolRuntime {

@@ -186,14 +186,42 @@ function runClaude(root: string, queries: Query[], broken: Case["broken"]): Prom
 	});
 }
 
-/** 从 Claude Code 的会话记录里取出诊断消息正文。 */
+/** 从 Claude Code 的会话记录里取出诊断消息正文：逐行解析 JSON，在解码后的所有字符串里找 <new-diagnostics>。 */
 function claudeDiagnostics(root: string, sessionId: string): string[] {
 	const dir = join(homedir(), ".claude", "projects", root.replace(/[^a-zA-Z0-9]/g, "-"));
 	const file = join(dir, `${sessionId}.jsonl`);
 	if (!existsSync(file)) return [];
-	const out: string[] = [];
-	for (const m of readFileSync(file, "utf8").matchAll(/<new-diagnostics>[\s\S]*?<\/new-diagnostics>/g)) out.push(m[0]);
-	return [...new Set(out.map((s) => JSON.parse(`"${s.replace(/"/g, '\\"')}"`.replace(/\\\\"/g, '\\"')) as string).map((s) => s.replace(/\\n/g, "\n")))];
+	const out = new Set<string>();
+	const walk = (v: unknown): void => {
+		if (typeof v === "string") {
+			for (const m of v.matchAll(/<new-diagnostics>[\s\S]*?<\/new-diagnostics>/g)) out.add(m[0]);
+		} else if (Array.isArray(v)) v.forEach(walk);
+		else if (v && typeof v === "object") Object.values(v).forEach(walk);
+	};
+	for (const line of readFileSync(file, "utf8").split("\n")) {
+		if (!line.includes("new-diagnostics")) continue;
+		try {
+			walk(JSON.parse(line));
+		} catch {
+			// 截断的行跳过。
+		}
+	}
+	return [...out];
+}
+
+/** 把若干条诊断消息拆成「文件 → 条目」的多重集合，用于分批方式不同时的比较。 */
+function itemsByFile(messages: string[]): string {
+	const map = new Map<string, string[]>();
+	for (const m of messages) {
+		const body = m.replace(/^<new-diagnostics>The following new diagnostic issues were detected:\n\n/, "").replace(/<\/new-diagnostics>$/, "");
+		for (const block of body.split("\n\n")) {
+			const [head, ...items] = block.split(/\n(?=  [✘⚠ℹ★•] \[Line)/);
+			const list = map.get(head) ?? [];
+			list.push(...items);
+			map.set(head, list);
+		}
+	}
+	return [...map.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([h, items]) => `${h}\n${[...new Set(items)].sort().join("\n")}`).join("\n\n");
 }
 
 /**
@@ -260,15 +288,20 @@ for (const c of CASES) {
 		const theirDiags = claudeDiagnostics(root, claude.sessionId).map(normalizeClaude);
 		const ours = await s.edit(c.broken.file, c.broken.text, 3000);
 		let oursAll = ours;
+		const ourMessages = ours ? [ours] : [];
 		const end = Date.now() + 15_000;
-		while (Date.now() < end && !theirDiags.includes(oursAll)) {
+		while (Date.now() < end && !theirDiags.includes(oursAll) && itemsByFile(ourMessages) !== itemsByFile(theirDiags)) {
 			await new Promise((r) => setTimeout(r, 1000));
 			const more = s.hub.take()?.text;
-			if (more) oursAll = more;
+			if (more) {
+				oursAll = more;
+				ourMessages.push(more);
+			}
 		}
 		if (theirDiags.length === 0) process.stdout.write(`INFO 诊断：Claude Code 的会话里没有出现 <new-diagnostics>（它不等服务器推送，可能晚于会话结束）；pi-lsp：\n${ours}\n`);
 		else if (theirDiags.includes(oursAll) || theirDiags.includes(ours)) process.stdout.write(`PASS 诊断消息逐字一致\n`);
 		else if (theirDiags.map(orderInsensitive).includes(orderInsensitive(oursAll))) process.stdout.write(`PASS 诊断消息的条目逐字一致，只有同级别诊断的先后不同（D3：推送与拉取两路合并）\n`);
+		else if (itemsByFile(ourMessages) === itemsByFile(theirDiags)) process.stdout.write(`PASS 诊断条目逐字一致，只有分批方式不同（送达时机不同：D5 等待与各自打开文件的时机）\n`);
 		else {
 			failures++;
 			process.stdout.write(`FAIL 诊断消息不一致\n--- Claude Code\n${theirDiags.join("\n")}\n--- pi-lsp\n${oursAll}\n---\n`);

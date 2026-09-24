@@ -74,11 +74,14 @@ export function session(root: string, cwd = root): Session {
 		settings,
 		lsp: (p) => runLsp(rt, p),
 		async edit(rel, text, waitMs = 3000) {
+			// 与 index.ts 相同：同步与等待共用一个截止时间。
 			const path = join(root, rel);
 			writeFileSync(path, text);
+			const deadline = Date.now() + waitMs;
 			hub.markEdited(path);
 			const inst = await manager.syncEdited(path);
-			if (inst) await hub.waitFor(path, waitMs);
+			const left = deadline - Date.now();
+			if (inst && left > 0) await hub.waitFor(path, left);
 			return hub.take()?.text ?? "";
 		},
 		async until(p, pred, timeoutMs = 60_000) {

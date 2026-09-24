@@ -113,8 +113,8 @@ test("C-9 临时的空结果不结束等待", async () => {
 	assert.match(hub.take()?.text ?? "", /real/);
 });
 
-test("C-9 等待：收到后安静 300ms 就结束；一直没有结果时最多等上限", async () => {
-	const hub = new DiagnosticsHub(cwd);
+test("C-9 等待：收到后安静一段时间（这里设 300ms）就结束；一直没有结果时最多等上限", async () => {
+	const hub = new DiagnosticsHub(cwd, 300);
 	hub.markEdited("/w/p/a.go");
 	const t0 = Date.now();
 	setTimeout(() => hub.receive(uri("a.go"), "push", [d(0, "x")]), 100);

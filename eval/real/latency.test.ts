@@ -26,7 +26,8 @@ for (const c of CASES) {
 			const times: number[] = [];
 			for (let i = 0; i < 10; i++) {
 				const t0 = Date.now();
-				await s.edit(c.file, i % 2 ? c.good : c.bad);
+				// 上一次写入的是 bad，从 good 开始交替，保证每次内容都真的变了。
+				await s.edit(c.file, i % 2 ? c.bad : c.good);
 				times.push(Date.now() - t0);
 			}
 			const m = median(times);

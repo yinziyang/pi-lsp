@@ -89,7 +89,7 @@ pi install git:https://github.com/yinziyang/pi-lsp.git
 | D2 | 启动、关闭、请求的等待都没有上限 | 启动 30 秒、请求 60 秒；关闭依次是 shutdown（3 秒）、exit（2 秒）、SIGTERM（2 秒）、SIGKILL |
 | D3 | 只接收推送诊断 | 同时支持拉取（TS 7 只支持拉取），服务器要求刷新时重新拉取 |
 | D4 | 不处理 `client/registerCapability` 等反向请求 | 接受并记录动态注册，应答进度请求 |
-| D5 | 不等服务器推送，诊断常常晚一轮 | edit / write 后等诊断：安静 300ms 就收，最多 3 秒；更晚到的下一轮送 |
+| D5 | 不等服务器推送，诊断常常晚一轮 | edit / write 后等诊断：安静 150ms 就收，最多 3 秒；更晚到的下一轮送 |
 | D6 | 用 Bash 改的文件服务器不知道 | bash 之后比对已打开文件的磁盘内容，变了就同步 |
 | D7 | 项目根只用启动目录 | 按 `go.mod`、`Cargo.toml`、`compile_commands.json` 等标记为每个文件找项目根 |
 | D8 | `.h` 一律当 C | 按编译数据库或项目里有没有 C++ 源文件判断 |

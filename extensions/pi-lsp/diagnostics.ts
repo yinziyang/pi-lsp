@@ -3,7 +3,7 @@
 // 数据流：服务器推送或拉取得到的诊断 → receive() 按文件与通道记下当前结果 → 与「已送达」比较得出新增项放进待送队列 → take() 取出渲染成 <new-diagnostics>。
 // 与 Claude Code 对齐：只保留 message / severity / range / source / code；按这五项去重，只报新增；编辑过的文件清掉已送达记录后重新全量上报；
 // 每个文件 10 条、总共 30 条，按严重级别排序；已送达记录最多保留 500 个文件；正文超过 4000 字符截断。
-// 有意偏离：V1 写相对路径而不是 basename；V2 不送 Hint；V3 编辑后问题全部消失时报一行「已消失」；D5 编辑后可以等一小段时间收诊断。
+// 有意偏离：V1 写相对路径而不是 basename；V2 不送 Hint；V3 编辑后问题全部消失时报一行「已消失」；D5 编辑后等诊断，安静 150ms 就收。
 //
 // 通道：同一个文件可能同时有推送与拉取两路结果（rust-analyzer 的 cargo check 走推送，自身分析走拉取），分开记。
 // 编辑后各路旧结果标为过期，只有重新上报过的一路才参与新增判断；所有上报过的路都重新报了空，才算「已消失」。实测不这样做时，修好之后会把编辑前 cargo check 的旧错误再送一次。
@@ -78,6 +78,9 @@ interface FileState {
  */
 export const STALE_CHANNEL_MS = 8000;
 
+/** D5 的安静窗口，毫秒，取值依据见构造函数的说明。 */
+export const QUIET_MS = 150;
+
 type Waiter = { path: string; resolve: () => void; quiet?: NodeJS.Timeout };
 
 export class DiagnosticsHub {
@@ -93,7 +96,11 @@ export class DiagnosticsHub {
 	private readonly quietMs: number;
 	private readonly staleMs: number;
 
-	constructor(cwd: string, quietMs = 300, staleMs = STALE_CHANNEL_MS) {
+	/**
+	 * quietMs：D5 的安静窗口，收到一路结果后再这么久没有新结果就结束等待，默认 150ms。
+	 * 实测 300ms 时 pyright 编辑后的等待中位数是 570ms，超过计划定的 500ms 上限；150ms 时是 421ms，真实服务器验收没有因此漏报。
+	 */
+	constructor(cwd: string, quietMs = QUIET_MS, staleMs = STALE_CHANNEL_MS) {
 		this.cwd = cwd;
 		this.quietMs = quietMs;
 		this.staleMs = staleMs;
