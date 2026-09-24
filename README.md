@@ -58,7 +58,8 @@ pi install git:https://github.com/yinziyang/pi-lsp.git
 - 同一服务器在多个项目根上各有实例时写成 `gopls ✓×2`。
 - `LSP installing pyright…`：正在安装。
 
-装不装 pi-statusline 都能显示，两边都读 pi 的 `setStatus`。
+- 没装 pi-statusline 时显示在 pi 自带底栏的状态行。
+- 装了 [pi-statusline](https://github.com/yinziyang/pi-statusline) 时显示在输入框上方一行的右侧，挨着 MCP，不另占一行。
 非交互模式（`-p`、`--mode json`）与没有任何可用服务器时不显示。
 
 ## 配置

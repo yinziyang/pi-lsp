@@ -31,6 +31,7 @@ const EDIT_WAIT_MS = 3000;
  * pi 与 pi-statusline 都按键名排序、把各扩展的状态拼成一行，pi-statusline 还给整行套一层 dim。
  * 我们的状态带颜色，主题的 fg 在末尾只复位前景色，排在我们后面的状态会因此丢掉外层的 dim。
  * 所以键取一个排在最后的名字，后面不再有别的状态；键本身不显示。
+ * pi-statusline 认这个键，把它挪到输入框上方一行的右侧显示，改名要两边一起改。
  */
 const STATUS_KEY = "zz-pi-lsp";
 
