@@ -5,9 +5,9 @@
 //   - gopls 用 go install，GOBIN 指向 <lspDir>/bin；rust-analyzer 用 rustup component add。
 //   - clangd 不由本扩展安装：macOS 用 Xcode 命令行工具自带的，Linux 用系统包管理器，只给出说明。
 //   - 不执行 curl | sh 一类的脚本安装；npm 用它自己配置的源。
-// 命令执行通过 Exec 注入：生产环境用 pi.exec，测试里换成记录调用的假实现，不真的安装。
+// 命令执行通过 Exec 注入：生产环境用 index.ts 里基于 execFile 的实现，单元测试里换成记录调用的假实现，不真的安装。
 
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 export interface Exec {
 	(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout: number; signal?: AbortSignal }): Promise<{ code: number | null; stdout: string; stderr: string }>;
@@ -105,8 +105,10 @@ export function installHint(serverName: string, ctx: PlanContext): string {
 /** 依次执行安装步骤，任何一步失败即停止并返回原因。 */
 export async function runInstall(plan: InstallPlan, exec: Exec, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<{ ok: boolean; output: string }> {
 	let output = "";
+	// npm 是 #!/usr/bin/env node 的脚本，PATH 上没有 node 时直接失败（从图形界面启动 pi、node 由 nvm 管理时就是这样）；把 pi 所用的 node 放到最前。
+	const path = [dirname(process.execPath), env.PATH ?? ""].filter(Boolean).join(delimiter);
 	for (const step of plan.steps) {
-		const r = await exec(step.command, step.args, { env: { ...env, ...step.env }, timeout: INSTALL_STEP_TIMEOUT_MS, signal });
+		const r = await exec(step.command, step.args, { env: { ...env, PATH: path, ...step.env }, timeout: INSTALL_STEP_TIMEOUT_MS, signal });
 		output += `$ ${[step.command, ...step.args].join(" ")}\n${r.stdout}${r.stderr}`;
 		if (r.code !== 0) return { ok: false, output: `${output}\n(exit ${r.code})` };
 	}

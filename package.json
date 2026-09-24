@@ -22,7 +22,8 @@
   "scripts": {
     "test": "node --test \"test/*.test.ts\"",
     "test:real": "node --test \"eval/real/*.test.ts\"",
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "tsc --noEmit -p .",
+    "test:install": "node --test \"eval/install/*.test.ts\""
   },
   "dependencies": {
     "vscode-jsonrpc": "^9.0.2",

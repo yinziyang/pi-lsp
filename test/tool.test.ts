@@ -146,7 +146,13 @@ test("G-2 安装执行：按步骤执行，失败即停并带上输出", async (
 		return { code: calls.length === 1 ? 0 : 1, stdout: "out", stderr: "boom" };
 	};
 	const plan = { server: "x", label: "x", steps: [{ command: "a", args: ["1"] }, { command: "b", args: ["2"] }, { command: "c", args: [] }] };
-	const r = await runInstall(plan, exec, {});
+	const seenPath: string[] = [];
+	const spy: Exec = async (cmd, args, o) => {
+		seenPath.push(o.env?.PATH ?? "");
+		return exec(cmd, args, o);
+	};
+	const r = await runInstall(plan, spy, { PATH: "/usr/bin" });
+	assert.ok(seenPath[0].startsWith((await import("node:path")).dirname(process.execPath)), "pi 所用的 node 在 PATH 最前，npm 这类 node 脚本才跑得起来");
 	assert.equal(r.ok, false);
 	assert.equal(calls.length, 2, "第二步失败后不再执行第三步");
 	assert.match(r.output, /boom/);
