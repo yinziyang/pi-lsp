@@ -7,9 +7,10 @@
 //   - 定义、引用、实现、工作区符号的结果用 git check-ignore 过滤掉被忽略的路径。
 // 有意偏离 V4：工具说明末尾加一句使用引导。
 // 有意偏离 D13：服务器启动后的第一次查询先等它就绪（见 client.ts 的 Readiness），Claude Code 不等，冷启动时会拿到不完整的结果。
+// 有意偏离 V5：按位置的操作落空或出错时，在结果后附上该行原文与行内各标识符的列号（见 positionHint）。
 
 import { execFile } from "node:child_process";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -128,6 +129,46 @@ function validate(p: LspParams): void {
 	if (problems.length) throw new Error(`Invalid input: ${problems.join("; ")}`);
 }
 
+function withHint(text: string, hint: string): string {
+	return hint ? `${text}\n\n${hint}` : text;
+}
+
+/** 依赖 line / character 的操作，位置打偏时结果为空或出错。 */
+const POSITIONAL: ReadonlySet<Operation> = new Set(OPERATIONS.filter((op) => op !== "documentSymbol" && op !== "workspaceSymbol"));
+
+const isCallsQuery = (op: Operation): boolean => op === "incomingCalls" || op === "outgoingCalls";
+
+/** 结果为空：没有命中任何符号。 */
+function isEmpty(result: unknown): boolean {
+	return result == null || (Array.isArray(result) && result.length === 0);
+}
+
+const IDENTIFIER = /[\p{L}\p{Nl}_$][\p{L}\p{N}_$]*/gu;
+const MAX_LINE_TEXT = 200;
+const MAX_IDENTIFIERS = 30;
+
+/**
+ * V5：位置类操作落空或出错时附在结果后面的提示，给出该行原文与行内每个标识符的 1 基列号。
+ * 模型是估出 character 的，常常打在空白、标点或行尾之后；只回一句「没找到」时它连错两三次就改用 grep。
+ * 只给信息、不替模型换位置：同一行常有多个标识符（如 pkg.Table.Get），自动挑一个可能跳错地方，且结果与请求的位置对不上。
+ * 列号按 UTF-16 计，与参数的 character 一致。读不到文件时返回空串，不影响原结果。
+ */
+export async function positionHint(absPath: string, line: number): Promise<string> {
+	let text: string;
+	try {
+		text = await readFile(absPath, "utf8");
+	} catch {
+		return "";
+	}
+	const lines = text.split(/\r?\n/);
+	if (line > lines.length) return `Line ${line} is past the end of the file, which has ${lines.length} lines.`;
+	const src = lines[line - 1];
+	const ids = [...src.matchAll(IDENTIFIER)].slice(0, MAX_IDENTIFIERS).map((m) => `${m[0]} ${m.index + 1}`);
+	const shown = src.trim().length > MAX_LINE_TEXT ? `${src.trim().slice(0, MAX_LINE_TEXT)}…` : src.trim();
+	if (ids.length === 0) return `Line ${line} has no identifiers: ${shown}`;
+	return `Line ${line}: ${shown}\nIdentifiers on this line (name character): ${ids.join(", ")}\nIf the position was off, retry with the character of the identifier you meant.`;
+}
+
 /** 执行一次 lsp 工具调用，返回给模型的文本。参数或文件问题直接抛错。 */
 export async function runLsp(rt: ToolRuntime, p: LspParams, signal?: AbortSignal): Promise<string> {
 	validate(p);
@@ -158,14 +199,19 @@ export async function runLsp(rt: ToolRuntime, p: LspParams, signal?: AbortSignal
 		const { method, params } = requestFor(p, abs);
 		let result = await rt.manager.request<unknown>(inst, method, params, signal);
 		if (p.operation === "incomingCalls" || p.operation === "outgoingCalls") {
-			if (!Array.isArray(result) || result.length === 0) return NO_CALL_HIERARCHY_ITEM;
+			if (!Array.isArray(result) || result.length === 0) return withHint(NO_CALL_HIERARCHY_ITEM, await positionHint(abs, p.line));
 			const next = p.operation === "incomingCalls" ? "callHierarchy/incomingCalls" : "callHierarchy/outgoingCalls";
 			result = await rt.manager.request<unknown>(inst, next, { item: result[0] }, signal);
 		}
 		result = await filterIgnored(p.operation, result, rt.cwd);
-		return formatResult(p.operation, result, rt.cwd);
+		const text = formatResult(p.operation, result, rt.cwd);
+		// incoming / outgoing 走到这里时位置已经命中（prepareCallHierarchy 有结果），为空只说明没有调用关系。
+		return POSITIONAL.has(p.operation) && !isCallsQuery(p.operation) && isEmpty(result) ? withHint(text, await positionHint(abs, p.line)) : text;
 	} catch (e) {
-		return `Error performing ${p.operation}: ${(e as Error).message}`;
+		const text = `Error performing ${p.operation}: ${(e as Error).message}`;
+		// 只有服务器回了错误（带 JSON-RPC 错误码）才可能是位置问题；超时、取消、启动失败与位置无关，不附提示。
+		const fromServer = typeof (e as { code?: unknown }).code === "number";
+		return POSITIONAL.has(p.operation) && fromServer ? withHint(text, await positionHint(abs, p.line)) : text;
 	}
 }
 
@@ -176,9 +222,17 @@ export async function runLsp(rt: ToolRuntime, p: LspParams, signal?: AbortSignal
  */
 export const PROMPT_SNIPPET = "Code intelligence from language servers: definitions, references, hover, symbols, implementations, call hierarchy";
 
-/** 追加到系统提示 Guidelines 的使用引导（V4）：优先用 lsp，不可用时退回文本搜索，不写成绝对禁止。 */
+/**
+ * 追加到系统提示 Guidelines 的使用引导（V4）：优先用 lsp，不可用时退回文本搜索，不写成绝对禁止。
+ * 按任务而不按「已知符号名」来写：模型手里常常只有一个概念或一处用法，只写「查某符号的定义、引用」时它会认定 lsp 不适用而去 grep。
+ *   - 第一条：凡是关于代码实体而非文本的问题都适用，并给出没有名字、没有位置时怎么起步。
+ *   - 第二条：依赖在工作区外（模块缓存、node_modules 等），grep 搜不到，模型会去 find、go list 或翻缓存目录；在用法处跳定义一步就拿到文件路径。
+ *   - 第三条：退回文本搜索的条件。
+ */
 export const PROMPT_GUIDELINES = [
-	"Prefer the lsp tool to find where a symbol is defined, its references, its implementations, or its callers. Fall back to grep or rg when lsp reports no server for the file type or returns an error, and use them for plain-text searches such as strings, comments, or config keys.",
+	"Prefer the lsp tool for any question about code entities rather than text: where something is defined or implemented, who uses or calls it, what type or documentation it has, or what a file declares. You do not need the exact name or position up front: find any line that mentions it with grep -n or read, then run lsp on that line, or search a partial name with workspaceSymbol.",
+	"For code in a dependency outside the workspace, such as the Go module cache, node_modules, or site-packages, run goToDefinition or hover on an import or a usage of it instead of locating the source with find, go list, pip show, or by browsing cache directories. goToDefinition returns the dependency's file path, which you can then read.",
+	"Fall back to grep or rg when lsp reports no server for the file type, returns an error, or returns nothing useful, and use them for plain-text searches such as strings, comments, or config keys.",
 ];
 
 export function createLspTool(getRuntime: () => ToolRuntime | undefined): ToolDefinition<typeof Parameters> {

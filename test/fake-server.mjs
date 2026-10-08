@@ -14,6 +14,7 @@
 //   publishVersion      推送诊断时附带的 version（用于过期诊断测试）
 //   responses           {method: result} 请求的固定返回
 //   neverRespond        [method] 永不回复
+//   errors              {method: {code, message}} 请求固定回错误（模拟 gopls 的 column is beyond end of line）
 //   contentModified     {method: n} 前 n 次回 -32801
 //   serverCancelled     {method: n} 前 n 次回 -32802
 //   ignoreShutdown / ignoreExit / ignoreTerm / ignoreEof  忽略相应的关闭信号
@@ -79,6 +80,10 @@ function onRequest(msg) {
 		return;
 	}
 	if ((S.neverRespond || []).includes(method)) return;
+	if (S.errors && method in S.errors) {
+		send({ id, error: S.errors[method] });
+		return;
+	}
 	if (S.contentModified && S.contentModified[method] > (cmCount[method] ?? 0)) {
 		cmCount[method] = (cmCount[method] ?? 0) + 1;
 		send({ id, error: { code: -32801, message: "content modified" } });

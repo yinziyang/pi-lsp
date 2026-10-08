@@ -119,7 +119,8 @@ pi install git:https://github.com/yinziyang/pi-lsp.git
 | V1 | 诊断只写文件名 | 写相对路径 |
 | V2 | Hint 级别也送 | 不送 Hint |
 | V3 | 问题修好了不告诉模型 | 之前报过诊断、编辑后全部消失时报一行 `<路径>: all previously reported issues are resolved` |
-| V4 | 没有使用引导 | 工具说明末尾加一句：查定义、引用、实现、调用者时优先用 lsp 而不是 grep；工具列进 pi 系统提示的 Available tools，并在 Guidelines 里加一条：优先用 lsp，lsp 没有服务器或出错时退回 grep / rg，纯文本搜索照常用 grep / rg |
+| V4 | 没有使用引导 | 工具说明末尾加一句：查定义、引用、实现、调用者时优先用 lsp 而不是 grep。工具列进 pi 系统提示的 Available tools，并在 Guidelines 里加三条。第一条：关于代码实体（定义、实现、用到它的地方、类型与文档、文件里声明了什么）的问题优先用 lsp，没有名字或位置时先用 grep -n、read 找到一处用法再在那一行用 lsp，或用 workspaceSymbol 搜部分名字。第二条：工作区外的依赖源码在用法处 goToDefinition / hover，不去 find、go list 或翻缓存目录。第三条：lsp 没有服务器、出错或没有有用结果时退回 grep / rg，纯文本搜索照常用 grep / rg |
+| V5 | 位置打偏时只回「No definition found…」或服务器的报错原文 | 按位置的操作（documentSymbol、workspaceSymbol 之外）落空，或服务器回了错误时，在结果后附上该行原文与行内每个标识符的列号，模型下一次能打准。命中时、调用关系为空时、超时等非服务器错误时不附 |
 
 ## 生命周期
 
@@ -153,7 +154,7 @@ node eval/pi/lifecycle.mjs   # 真实 pi 里的生命周期：退出、kill -9�
 node eval/pi/e2e.mjs         # 真实 pi 里的端到端与共存（调用模型）
 node eval/pi/ui.mjs          # 真实 pi 里的安装确认、非交互安装、/lsp 状态与重启（联网安装，调用模型）
 node eval/pi/compare.mjs     # 装与不装 pi-lsp 的对照：最终代码能否通过编译与类型检查（调用模型）
-node eval/pi/nav.mjs 3 a=<pi-lsp 目录> b=<另一版本目录>   # 在你已装的扩展环境里比较不同版本，导航类问题上模型用 lsp 还是 grep（调用模型）
+node eval/pi/nav.mjs 3 a=<pi-lsp 目录> b=<另一版本目录> --question refs   # 在你已装的扩展环境里比较不同版本，导航类问题上模型用 lsp 还是 grep；问题有 refs、chain、dbdef、dep、unit，后三个在依赖只在模块缓存里的 Go 工程上问（调用模型）
 node eval/parity/parity.ts   # 与 Claude Code 的 LSP 工具逐字节对比（需要 Claude Code 与官方 LSP 插件，调用模型）
 ```
 

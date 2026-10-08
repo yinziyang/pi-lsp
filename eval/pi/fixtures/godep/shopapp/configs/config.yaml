@@ -1,0 +1,4 @@
+# 数据库连接串由环境变量 SHOP_DSN 提供。
+database:
+  idle_timeout: 30
+  max_open: 20

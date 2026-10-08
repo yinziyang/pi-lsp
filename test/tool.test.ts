@@ -63,7 +63,7 @@ test("B-9 incomingCalls 先 prepare 再用第一项查询；prepare 为空时返
 	assert.deepEqual((readLog(log).find((e) => e.method === "callHierarchy/incomingCalls")?.params as { item: { name: string } }).item.name, "f");
 	await rt.manager.shutdownAll();
 	const empty = runtime([fakeServer("fake", {})], cwd);
-	assert.equal(await runLsp(empty, { operation: "outgoingCalls", filePath: "a.fake", line: 1, character: 1 }), "No call hierarchy item found at this position");
+	assert.match(await runLsp(empty, { operation: "outgoingCalls", filePath: "a.fake", line: 1, character: 1 }), /^No call hierarchy item found at this position\n\nLine 1: x\n/, "V5：prepare 为空时附上该行的标识符");
 	await empty.manager.shutdownAll();
 });
 
@@ -76,6 +76,22 @@ test("B-9 定义与引用的结果过滤掉被 gitignore 的路径", async () =>
 	const refs = [{ uri: `file://${join(cwd, "a.fake")}`, range: range(0) }, { uri: `file://${join(cwd, "gen", "z.fake")}`, range: range(1) }];
 	const rt = runtime([fakeServer("fake", { responses: { "textDocument/references": refs } })], cwd);
 	assert.equal(await runLsp(rt, { operation: "findReferences", filePath: "a.fake", line: 1, character: 1 }), "Found 1 reference:\n  a.fake:1:1");
+	await rt.manager.shutdownAll();
+});
+
+test("V5 位置类操作落空或服务器报错时附上该行原文与标识符列号，命中、非位置类操作与超时不附", async () => {
+	const cwd = tempDir();
+	writeFile(cwd, "a.fake", "package main\n\treturn shopdb.Orders.Get(ctx, r.db, id)\n}) // --\n");
+	const def = { uri: `file://${join(cwd, "a.fake")}`, range: range(0) };
+	const rt = runtime([fakeServer("fake", { responses: { "textDocument/references": [def] }, errors: { "textDocument/hover": { code: 0, message: "column is beyond end of line" } } })], cwd);
+	const hint = "Line 2: return shopdb.Orders.Get(ctx, r.db, id)\nIdentifiers on this line (name character): return 2, shopdb 9, Orders 16, Get 23, ctx 27, r 32, db 34, id 38\nIf the position was off, retry with the character of the identifier you meant.";
+	// 期望列号按原文手数：第 1 列是制表符，return 从第 2 列开始。
+	assert.equal(await runLsp(rt, { operation: "goToDefinition", filePath: "a.fake", line: 2, character: 60 }), `No definition found. This may occur if the cursor is not on a symbol, or if the definition is in an external library not indexed by the LSP server.\n\n${hint}`);
+	assert.equal(await runLsp(rt, { operation: "hover", filePath: "a.fake", line: 2, character: 60 }), `Error performing hover: LSP request 'textDocument/hover' failed for server 'fake': column is beyond end of line\n\n${hint}`);
+	assert.match(await runLsp(rt, { operation: "goToDefinition", filePath: "a.fake", line: 3, character: 1 }), /\n\nLine 3 has no identifiers: }\) \/\/ --$/);
+	assert.match(await runLsp(rt, { operation: "goToDefinition", filePath: "a.fake", line: 9, character: 1 }), /\n\nLine 9 is past the end of the file, which has 4 lines\.$/);
+	assert.equal(await runLsp(rt, { operation: "findReferences", filePath: "a.fake", line: 2, character: 16 }), "Found 1 reference:\n  a.fake:1:1", "命中时不附");
+	assert.equal(await runLsp(rt, { operation: "documentSymbol", filePath: "a.fake", line: 2, character: 60 }), "No symbols found in document. This may occur if the file is empty, not supported by the LSP server, or if the server has not fully indexed the file.", "不按位置的操作不附");
 	await rt.manager.shutdownAll();
 });
 
@@ -129,15 +145,17 @@ test("B-11 工具的参数定义与 Claude Code 一致，说明是原文加 V4 �
 	assert.ok(TOOL_DESCRIPTION.endsWith("Prefer this tool over grep when looking up where a symbol is defined, its references, its implementations, or its callers."));
 });
 
-test("B-11 V4：工具进入 pi 系统提示的工具列表，引导是优先用 lsp、不可用时退回 grep / rg", () => {
+test("B-11 V4：工具进入 pi 系统提示的工具列表，引导按任务写、覆盖依赖源码、不可用时退回 grep / rg", () => {
 	const tool = createLspTool(() => undefined);
 	// pi 只把填了 promptSnippet 的自定义工具列进 Available tools。
 	assert.equal(tool.promptSnippet, PROMPT_SNIPPET);
 	assert.deepEqual(tool.promptGuidelines, PROMPT_GUIDELINES);
-	assert.equal(PROMPT_GUIDELINES.length, 1);
-	assert.match(PROMPT_GUIDELINES[0], /^Prefer the lsp tool/);
-	assert.match(PROMPT_GUIDELINES[0], /Fall back to grep or rg when lsp reports no server/);
-	assert.doesNotMatch(PROMPT_GUIDELINES[0], /\b(never|must not|do not use)\b/i, "引导不写成绝对禁止");
+	assert.equal(PROMPT_GUIDELINES.length, 3);
+	assert.match(PROMPT_GUIDELINES[0], /^Prefer the lsp tool for any question about code entities/);
+	assert.match(PROMPT_GUIDELINES[0], /You do not need the exact name or position up front/);
+	assert.match(PROMPT_GUIDELINES[1], /dependency outside the workspace.*goToDefinition or hover on an import or a usage/);
+	assert.match(PROMPT_GUIDELINES[2], /^Fall back to grep or rg when lsp reports no server/);
+	for (const g of PROMPT_GUIDELINES) assert.doesNotMatch(g, /\b(never|must not|do not use)\b/i, "引导不写成绝对禁止");
 });
 
 test("G-3 安装计划：npm 类装进本扩展目录；缺 go、缺 rustup 时说清楚缺什么；clangd 只给说明", () => {
