@@ -1,21 +1,25 @@
 // pi-lsp：为 pi 提供与 Claude Code 对齐的 LSP 能力。
 //
-// 本文件只做接线，把 pi 的事件接到各模块上：
+// 本文件负责事件接线及自动同步的磁盘变化判断。
 //   - session_start：读设置、清理上一个 pi 遗留的服务器进程、建立路由与实例管理器、有可用服务器时注册 lsp 工具。
-//   - tool_result：edit / write 成功后同步文件并短暂等待诊断（D5），bash 之后比对已打开文件（D6），随后把待送诊断用 steer 投递。
+//   - tool_call / tool_result：受限比对 write / edit 前后内容，发生变化才同步并短暂等待诊断（D5），成功 bash 后比对已打开文件（D6），随后把待送诊断用 steer 投递。
 //   - agent_end：本轮结束后才到的诊断用 nextTurn 投递，在用户下次发消息时送达。
 //   - session_shutdown：关闭本会话的全部服务器，每个都有上限。
 //   - 状态栏：实例状态每变化一次，用 ctx.ui.setStatus 写一次，运行中的服务器用主题的 success 色（绿色）标出。
-//     pi 自带的底栏与 pi-statusline 都把 setStatus 的各个键按键名排序显示在一行里，所以不需要探测装没装 pi-statusline。
+// pi 自带的底栏与 pi-statusline 都把 setStatus 的各个键按键名排序显示在一行里，所以不需要探测装没装 pi-statusline。
 // 生命周期的完整说明见 manager.ts 与 process.ts；设计依据见计划文档 docs/pi-lsp-plan.md。
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { loadSettings, type LspSettings } from "./config.ts";
 import { DiagnosticsHub } from "./diagnostics.ts";
+import { MAX_FILE_BYTES } from "./documents.ts";
 import { type Exec, installHint, installPlan, INSTALLABLE, type PlanContext, runInstall, serverForTarget, toolDirs } from "./install.ts";
 import type { ClientState } from "./client.ts";
 import { ServerManager } from "./manager.ts";
@@ -41,6 +45,8 @@ interface Runtime extends ToolRuntime {
 	hub: DiagnosticsHub;
 	planCtx: PlanContext;
 	ctx: ExtensionContext;
+	/** 仅保留可确认的写前快照，按调用标识隔离，不保留文件正文。 */
+	pendingEdits: Map<string, { path: string; snapshot: string | null }>;
 	/** 本会话已经提示过「未安装」的服务器，每个只提示一次。 */
 	warnedMissing: Set<string>;
 	/** 正在安装的服务器说明，安装期间显示在状态栏。 */
@@ -68,6 +74,26 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
 			() => { clearTimeout(t); res(undefined); },
 		);
 	});
+}
+
+/** 文件不存在返回 null，不可读或超过 LSP 大小上限返回 undefined，否则返回内容摘要。 */
+async function fileSnapshot(path: string, signal?: AbortSignal): Promise<string | null | undefined> {
+	try {
+		const st = await stat(path);
+		if (!st.isFile() || st.size > MAX_FILE_BYTES) return undefined;
+		const hash = createHash("sha256");
+		let bytes = 0;
+		// 最多读上限加一字节，避免 stat 后文件增长导致无限读取，流退出时自动释放句柄。
+		for await (const chunk of createReadStream(path, { start: 0, end: MAX_FILE_BYTES, signal })) {
+			bytes += chunk.length;
+			if (bytes > MAX_FILE_BYTES) return undefined;
+			hash.update(chunk);
+		}
+		return hash.digest("hex");
+	} catch (error) {
+		// 文件竞争、权限或取消均不应覆盖工具与规范反馈，无法确认的变化不触发自动同步。
+		return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined;
+	}
 }
 
 function plural(n: number, word: string): string {
@@ -172,6 +198,7 @@ export default function piLsp(pi: ExtensionAPI) {
 			planCtx,
 			ctx,
 			cwd: ctx.cwd,
+			pendingEdits: new Map(),
 			warnedMissing: new Set(),
 			onMissing: (serverName, _command, signal) => onMissing(runtime, serverName, signal),
 		};
@@ -200,18 +227,34 @@ export default function piLsp(pi: ExtensionAPI) {
 				// ctx 已失效时 pi 会随会话一起清掉状态栏。
 			}
 		}
+		r.pendingEdits.clear();
 		r.hub.dispose();
 		await r.manager.shutdownAll();
 		liveManagers.delete(r.manager);
 	});
 
+	pi.on("tool_call", async (event, ctx) => {
+		const r = rt;
+		if (!r || (event.toolName !== "edit" && event.toolName !== "write")) return;
+		const rawPath = (event.input as { path?: unknown }).path;
+		if (typeof rawPath !== "string") return;
+		const path = resolve(ctx.cwd, rawPath);
+		const snapshot = await fileSnapshot(path, ctx.signal);
+		if (rt === r && snapshot !== undefined) r.pendingEdits.set(event.toolCallId, { path, snapshot });
+	});
+
 	pi.on("tool_result", async (event, ctx) => {
 		const r = rt;
-		if (!r || event.isError) return;
+		if (!r) return;
 		if (event.toolName === "edit" || event.toolName === "write") {
-			const rawPath = (event.input as { path?: unknown }).path;
-			if (typeof rawPath === "string") {
-				const path = resolve(ctx.cwd, rawPath);
+			const before = r.pendingEdits.get(event.toolCallId);
+			r.pendingEdits.delete(event.toolCallId);
+			if (before) {
+				const { path } = before;
+				const after = await fileSnapshot(path, ctx.signal);
+				// 最终错误可能来自写后检查，磁盘变化才是同步依据，不清除任何错误或规范反馈。
+				// 前后快照不证明工具成功，也不能排除外部并发写入或失败后的部分落盘。
+				if (rt !== r || after === undefined || after === null || after === before.snapshot) return;
 				const found = r.manager.lookup(path);
 				if (found.kind === "missing" && ctx.hasUI && !r.warnedMissing.has(found.server.name)) {
 					r.warnedMissing.add(found.server.name);
@@ -225,13 +268,19 @@ export default function piLsp(pi: ExtensionAPI) {
 					if (synced && r.settings.diagnostics && synced.server.diagnostics && left > 0) await r.hub.waitFor(path, left, ctx.signal);
 				}
 			}
+		} else if (event.isError) {
+			return;
 		} else if (event.toolName === "bash") {
 			await withTimeout(r.manager.reconcileAll(), EDIT_WAIT_MS);
 		}
 		flush("steer");
 	});
 
-	pi.on("agent_end", () => flush("nextTurn"));
+	pi.on("agent_end", () => {
+		// 写前门禁可能阻断执行而不产生 tool_result，轮次结束时释放这些快照。
+		rt?.pendingEdits.clear();
+		flush("nextTurn");
+	});
 
 	pi.registerCommand("lsp", {
 		description: "Language servers: /lsp (status), /lsp install <language>, /lsp restart [server]",
